@@ -12,7 +12,7 @@
 #include <array>
 
 constexpr auto BUILD_FLAGS = nri::AccelerationStructureBits::PREFER_FAST_TRACE;
-constexpr uint32_t RAY_TRACING_OBJ_NUM = 1;
+#define RAY_TRACING_OBJ_NUM ((uint32_t)m_Scene.instances.size())
 
 constexpr uint32_t GLOBAL_DESCRIPTOR_SET = 0;
 constexpr uint32_t MATERIAL_DESCRIPTOR_SET = 1;
@@ -259,10 +259,11 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool isFirstTime) {
     utils::ShaderCodeStorage shaderCodeStorage;
     {
         {
-            nri::DescriptorRangeDesc globalDescriptorRange[3] = {};
+            nri::DescriptorRangeDesc globalDescriptorRange[4] = {};
             globalDescriptorRange[0] = {0, 1, nri::DescriptorType::CONSTANT_BUFFER, nri::StageBits::ALL};
             globalDescriptorRange[1] = {0, 1, nri::DescriptorType::SAMPLER, nri::StageBits::FRAGMENT_SHADER};
             globalDescriptorRange[2] = {0, BUFFER_COUNT, nri::DescriptorType::STRUCTURED_BUFFER, nri::StageBits::ALL};
+            globalDescriptorRange[3] = {3, 1, nri::DescriptorType::ACCELERATION_STRUCTURE, nri::StageBits::FRAGMENT_SHADER};
 
             // Bindless descriptors
             nri::DescriptorRangeDesc textureDescriptorRange[1] = {};
@@ -367,7 +368,7 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool isFirstTime) {
 
         nri::ShaderDesc shaderStages[] = {
             utils::LoadShader(deviceDesc.graphicsAPI, "ForwardBindless.vs", shaderCodeStorage),
-            utils::LoadShader(deviceDesc.graphicsAPI, "ForwardBindless.fs", shaderCodeStorage),
+            utils::LoadShader(deviceDesc.graphicsAPI, "ForwardBindlessRayQuery.fs", shaderCodeStorage),
         };
 
         nri::GraphicsPipelineDesc graphicsPipelineDesc = {};
@@ -640,6 +641,7 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool isFirstTime) {
         descriptorPoolDesc.bufferMaxNum = 3 * 2 * TEST;
         descriptorPoolDesc.structuredBufferMaxNum = 4 * 2 * TEST;
         descriptorPoolDesc.constantBufferMaxNum = GetQueuedFrameNum();
+        descriptorPoolDesc.accelerationStructureMaxNum = 1;
 
         NRI_ABORT_ON_FAILURE(NRI.CreateDescriptorPool(*m_Device, descriptorPoolDesc, m_DescriptorPool));
     }
@@ -816,6 +818,12 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool isFirstTime) {
         CreateBottomLevelAccelerationStructure();
         CreateTopLevelAccelerationStructure();
         CreateShaderTable();
+
+        // Bind TLAS to the global descriptor sets for forward rendering
+        for (uint32_t i = 0; i < GetQueuedFrameNum(); i++) {
+            nri::UpdateDescriptorRangeDesc updateDesc = {m_DescriptorSets[i], 3, 0, &m_TLASDescriptor, 1};
+            NRI.UpdateDescriptorRanges(&updateDesc, 1);
+        }
     }
 
     return InitImgui(*m_Device);
@@ -1132,7 +1140,7 @@ void Sample::CreateRayTracingPipeline() {
     const nri::ShaderGroupDesc shaderGroupDescs[] = {{0}, {1}, {2}};
 
     nri::RayTracingPipelineDesc pipelineDesc = {};
-    pipelineDesc.recursionMaxDepth = 1;
+    pipelineDesc.recursionMaxDepth = 8;
     pipelineDesc.rayPayloadMaxSize = 3 * sizeof(float);
     pipelineDesc.rayHitAttributeMaxSize = 2 * sizeof(float);
     pipelineDesc.pipelineLayout = m_RayTracingPipelineLayout;
