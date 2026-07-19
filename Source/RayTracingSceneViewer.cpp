@@ -1,156 +1,47 @@
 ﻿// © 2021 NVIDIA Corporation
 
+#ifdef _WIN32
+#    include <d3d12.h> // RemoveDevice
+#endif
+
+#include "NRI.hlsl"
 #include "NRIFramework.h"
+
+#include "../Shaders/SceneViewerBindlessStructs.h"
 
 #include <array>
 
 constexpr auto BUILD_FLAGS = nri::AccelerationStructureBits::PREFER_FAST_TRACE;
-constexpr uint32_t BOX_NUM = 100000;
-constexpr float BOX_HALF_SIZE = 0.5f;
+constexpr uint32_t RAY_TRACING_OBJ_NUM = 1;
 
-static const float positions[12 * 6] = {
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    -BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
-    BOX_HALF_SIZE,
+constexpr uint32_t GLOBAL_DESCRIPTOR_SET = 0;
+constexpr uint32_t MATERIAL_DESCRIPTOR_SET = 1;
+constexpr float CLEAR_DEPTH = 0.0f;
+constexpr uint32_t BUFFER_COUNT = 3;
+
+enum SceneBuffers {
+    // HOST_UPLOAD
+    CONSTANT_BUFFER,
+
+    // READBACK
+    READBACK_BUFFER,
+
+    // DEVICE
+    INDEX_BUFFER,
+    VERTEX_BUFFER,
+    MATERIAL_BUFFER,
+    MESH_BUFFER,
+    INSTANCE_BUFFER,
+    INDIRECT_BUFFER,
+    INDIRECT_COUNT_BUFFER,
+
+    MAX_NUM
 };
-
-static const float texCoords[12 * 4] = {
-    0.0f,
-    0.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    1.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    1.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    1.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    1.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    1.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    0.0f,
-    0.0f,
-    1.0f,
-    1.0f,
-    1.0f,
-};
-
-static const uint16_t indices[12 * 3] = {
-    0, 1, 2,
-    1, 2, 3,
-    4, 5, 6,
-    5, 6, 7,
-    8, 9, 10,
-    9, 10, 11,
-    12, 13, 14,
-    13, 14, 15,
-    16, 17, 18,
-    17, 18, 19,
-    20, 21, 22,
-    21, 22, 23};
 
 struct QueuedFrame {
     nri::CommandAllocator* commandAllocator;
     nri::CommandBuffer* commandBuffer;
+    uint32_t globalConstantBufferViewOffsets;
 };
 
 class Sample : public SampleBase {
@@ -158,71 +49,76 @@ public:
     Sample() {
     }
 
-    ~Sample();
+    ~Sample() {
+        Destroy();
+    }
 
-private:
-    bool Initialize(nri::GraphicsAPI graphicsAPI, bool) override;
+    void Destroy();
+
+    inline uint32_t GetDrawIndexedCommandSize() {
+        const nri::DeviceDesc& deviceDesc = NRI.GetDeviceDesc(*m_Device);
+        return deviceDesc.graphicsAPI == nri::GraphicsAPI::VK ? sizeof(nri::DrawIndexedDesc) : sizeof(nri::DrawIndexedBaseDesc); // sizeof(nri::DrawIndexedDesc) can be used if VS is compiled with SM 6.8
+    }
+
+    bool Initialize(nri::GraphicsAPI graphicsAPI, bool bFirstTime = true) override;
     void LatencySleep(uint32_t frameIndex) override;
+    void PrepareFrame(uint32_t frameIndex) override;
     void RenderFrame(uint32_t frameIndex) override;
-
-    void CreateSwapChain(nri::Format& swapChainFormat);
-    void CreateCommandBuffers();
     void CreateRayTracingPipeline();
-    void CreateRayTracingOutput(nri::Format swapChainFormat);
-    void CreateDescriptorSets();
+    void CreateUploadBuffer(uint64_t size, nri::BufferUsageBits usage, nri::Buffer*& buffer, nri::Memory*& memory);
+    void CreateScratchBuffer(nri::AccelerationStructure& accelerationStructure, nri::Buffer*& buffer, nri::Memory*& memory);
+    void BuildBottomLevelAccelerationStructure(nri::AccelerationStructure& accelerationStructure, const nri::BottomLevelGeometryDesc* objects, uint32_t objectNum);
+    void BuildTopLevelAccelerationStructure(nri::AccelerationStructure& accelerationStructure, uint32_t instanceNum, nri::Buffer& instanceBuffer);
     void CreateBottomLevelAccelerationStructure();
     void CreateTopLevelAccelerationStructure();
     void CreateShaderTable();
-    void CreateUploadBuffer(uint64_t size, nri::BufferUsageBits usage, nri::Buffer*& buffer, nri::Memory*& memory);
-    void CreateScratchBuffer(nri::AccelerationStructure& accelerationStructure, nri::Buffer*& buffer, nri::Memory*& memory);
-    void BuildBottomLevelAccelerationStructure(nri::AccelerationStructure& accelerationStructure, const nri::BottomLevelGeometryDesc* objects, const uint32_t objectNum);
-    void BuildTopLevelAccelerationStructure(nri::AccelerationStructure& accelerationStructure, uint32_t instanceNum, nri::Buffer& instanceBuffer);
-    void CreateShaderResources();
 
+private:
     NRIInterface NRI = {};
     nri::Device* m_Device = nullptr;
+    nri::Streamer* m_Streamer = nullptr;
     nri::SwapChain* m_SwapChain = nullptr;
     nri::Queue* m_GraphicsQueue = nullptr;
     nri::Fence* m_FrameFence = nullptr;
+    nri::DescriptorPool* m_DescriptorPool = nullptr;
+    nri::PipelineLayout* m_GraphicsPipelineLayout = nullptr;
+    nri::PipelineLayout* m_ComputePipelineLayout = nullptr;
+    nri::Descriptor* m_DepthAttachment = nullptr;
+    nri::Descriptor* m_IndirectBufferCountShaderStorage = nullptr;
+    nri::Descriptor* m_IndirectBufferShaderStorage = nullptr;
+    nri::QueryPool* m_QueryPool = nullptr;
+    nri::Pipeline* m_Pipeline = nullptr;
+    nri::Pipeline* m_ComputePipeline = nullptr;
 
     std::vector<QueuedFrame> m_QueuedFrames = {};
+    std::vector<SwapChainTexture> m_SwapChainTextures;
+    std::vector<nri::DescriptorSet*> m_DescriptorSets;
+    std::vector<nri::Texture*> m_Textures;
+    std::vector<nri::Buffer*> m_Buffers;
+    std::vector<nri::Memory*> m_MemoryAllocations;
+    std::vector<nri::Descriptor*> m_Descriptors;
 
-    nri::PipelineLayout* m_PipelineLayout = nullptr;
-    nri::Pipeline* m_Pipeline = nullptr;
+    bool m_UseGPUDrawGeneration = true;
+    nri::Format m_DepthFormat = nri::Format::UNKNOWN;
 
+    utils::Scene m_Scene;
+
+    // Ray Tracing
+    nri::AccelerationStructure* m_BLAS = nullptr;
+    nri::AccelerationStructure* m_TLAS = nullptr;
+    nri::Descriptor* m_TLASDescriptor = nullptr;
+    nri::Pipeline* m_RayTracingPipeline = nullptr;
+    nri::PipelineLayout* m_RayTracingPipelineLayout = nullptr;
+    nri::DescriptorSet* m_RayTracingDescriptorSet;
     nri::Buffer* m_ShaderTable = nullptr;
     uint64_t m_ShaderGroupIdentifierSize = 0;
     uint64_t m_MissShaderOffset = 0;
     uint64_t m_HitShaderGroupOffset = 0;
-
-    nri::Texture* m_RayTracingOutput = nullptr;
-    nri::Descriptor* m_RayTracingOutputView = nullptr;
-
-    nri::Buffer* m_TexCoordBuffer = nullptr;
-    nri::Buffer* m_IndexBuffer = nullptr;
-    nri::Descriptor* m_TexCoordBufferView = nullptr;
-    nri::Descriptor* m_IndexBufferView = nullptr;
-
-    nri::DescriptorPool* m_DescriptorPool = nullptr;
-    nri::DescriptorSet* m_DescriptorSets[3] = {};
-
-    nri::AccelerationStructure* m_BLAS = nullptr;
-    nri::AccelerationStructure* m_TLAS = nullptr;
-    nri::Descriptor* m_TLASDescriptor = nullptr;
-
-    const SwapChainTexture* m_BackBuffer = nullptr;
-    std::vector<SwapChainTexture> m_SwapChainTextures;
-    std::vector<nri::Memory*> m_MemoryAllocations;
 };
 
-Sample::~Sample() {
+void Sample::Destroy() {
     if (NRI.HasCore()) {
         NRI.DeviceWaitIdle(m_Device);
-
-        if (NRI.HasRayTracing()) {
-            NRI.DestroyAccelerationStructure(m_BLAS);
-            NRI.DestroyAccelerationStructure(m_TLAS);
-        }
 
         for (QueuedFrame& queuedFrame : m_QueuedFrames) {
             NRI.DestroyCommandBuffer(queuedFrame.commandBuffer);
@@ -235,80 +131,694 @@ Sample::~Sample() {
             NRI.DestroyDescriptor(swapChainTexture.colorAttachment);
         }
 
-        NRI.DestroyDescriptor(m_RayTracingOutputView);
-        NRI.DestroyDescriptor(m_TexCoordBufferView);
-        NRI.DestroyDescriptor(m_IndexBufferView);
-        NRI.DestroyDescriptor(m_TLASDescriptor);
+        for (size_t i = 0; i < m_Descriptors.size(); i++)
+            NRI.DestroyDescriptor(m_Descriptors[i]);
 
-        NRI.DestroyTexture(m_RayTracingOutput);
+        for (size_t i = 0; i < m_Textures.size(); i++)
+            NRI.DestroyTexture(m_Textures[i]);
 
-        NRI.DestroyDescriptorPool(m_DescriptorPool);
-
-        NRI.DestroyBuffer(m_ShaderTable);
-        NRI.DestroyBuffer(m_TexCoordBuffer);
-        NRI.DestroyBuffer(m_IndexBuffer);
-
-        NRI.DestroyPipeline(m_Pipeline);
-        NRI.DestroyPipelineLayout(m_PipelineLayout);
-
-        NRI.DestroyFence(m_FrameFence);
+        for (size_t i = 0; i < m_Buffers.size(); i++)
+            NRI.DestroyBuffer(m_Buffers[i]);
 
         for (size_t i = 0; i < m_MemoryAllocations.size(); i++)
             NRI.FreeMemory(m_MemoryAllocations[i]);
+
+        NRI.DestroyPipeline(m_Pipeline);
+        NRI.DestroyPipeline(m_ComputePipeline);
+        NRI.DestroyQueryPool(m_QueryPool);
+        NRI.DestroyPipelineLayout(m_GraphicsPipelineLayout);
+        NRI.DestroyPipelineLayout(m_ComputePipelineLayout);
+        NRI.DestroyDescriptorPool(m_DescriptorPool);
+        NRI.DestroyFence(m_FrameFence);
     }
 
     if (NRI.HasSwapChain())
         NRI.DestroySwapChain(m_SwapChain);
 
+    if (NRI.HasStreamer())
+        NRI.DestroyStreamer(m_Streamer);
+
     DestroyImgui();
 
+    if (NRI.HasRayTracing()) {
+        NRI.DestroyAccelerationStructure(m_BLAS);
+        NRI.DestroyAccelerationStructure(m_TLAS);
+        NRI.DestroyPipeline(m_RayTracingPipeline);
+        NRI.DestroyPipelineLayout(m_RayTracingPipelineLayout);
+        NRI.DestroyDescriptor(m_TLASDescriptor);
+        NRI.DestroyBuffer(m_ShaderTable);
+    }
+
     nri::nriDestroyDevice(m_Device);
+
+    m_QueuedFrames.clear();
+    m_SwapChainTextures.clear();
+    m_Descriptors.clear();
+    m_Textures.clear();
+    m_Buffers.clear();
+    m_MemoryAllocations.clear();
 }
 
-bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
+bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool isFirstTime) {
     // Adapters
     nri::AdapterDesc adapterDesc[2] = {};
     uint32_t adapterDescsNum = helper::GetCountOf(adapterDesc);
     NRI_ABORT_ON_FAILURE(nri::nriEnumerateAdapters(adapterDesc, adapterDescsNum));
 
+    // Device
     nri::DeviceCreationDesc deviceCreationDesc = {};
     deviceCreationDesc.graphicsAPI = graphicsAPI;
     deviceCreationDesc.enableGraphicsAPIValidation = m_DebugAPI;
     deviceCreationDesc.enableNRIValidation = m_DebugNRI;
+    deviceCreationDesc.enableD3D11CommandBufferEmulation = D3D11_ENABLE_COMMAND_BUFFER_EMULATION;
+    deviceCreationDesc.disableD3D12EnhancedBarriers = D3D12_DISABLE_ENHANCED_BARRIERS;
     deviceCreationDesc.vkBindingOffsets = VK_BINDING_OFFSETS;
     deviceCreationDesc.adapterDesc = &adapterDesc[std::min(m_AdapterIndex, adapterDescsNum - 1)];
     deviceCreationDesc.allocationCallbacks = m_AllocationCallbacks;
     NRI_ABORT_ON_FAILURE(nri::nriCreateDevice(deviceCreationDesc, m_Device));
 
+    // NRI
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::CoreInterface), (nri::CoreInterface*)&NRI));
+    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::HelperInterface), (nri::HelperInterface*)&NRI));
+    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::StreamerInterface), (nri::StreamerInterface*)&NRI));
+    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::SwapChainInterface), (nri::SwapChainInterface*)&NRI));
 
     const nri::DeviceDesc& deviceDesc = NRI.GetDeviceDesc(*m_Device);
-    if (deviceDesc.tiers.rayTracing == 0) {
-        printf("Ray tracing is not supported!\n");
+    if (!deviceDesc.tiers.bindless) {
+        printf("Bindless is not supported!\n");
         exit(0);
     }
 
-    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::SwapChainInterface), (nri::SwapChainInterface*)&NRI));
-    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::RayTracingInterface), (nri::RayTracingInterface*)&NRI));
-    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::HelperInterface), (nri::HelperInterface*)&NRI));
+    if (!deviceDesc.shaderFeatures.drawParameters) {
+        printf("Draw parameters are not supported!\n");
+        exit(0);
+    }
 
+    // Create streamer
+    nri::StreamerDesc streamerDesc = {};
+    streamerDesc.dynamicBufferMemoryLocation = nri::MemoryLocation::HOST_UPLOAD;
+    streamerDesc.dynamicBufferDesc = {0, 0, nri::BufferUsageBits::VERTEX_BUFFER | nri::BufferUsageBits::INDEX_BUFFER};
+    streamerDesc.constantBufferMemoryLocation = nri::MemoryLocation::HOST_UPLOAD;
+    streamerDesc.queuedFrameNum = GetQueuedFrameNum();
+    NRI_ABORT_ON_FAILURE(NRI.CreateStreamer(*m_Device, streamerDesc, m_Streamer));
+
+    // Command queue
     NRI_ABORT_ON_FAILURE(NRI.GetQueue(*m_Device, nri::QueueType::GRAPHICS, 0, m_GraphicsQueue));
+
+    // Fences
     NRI_ABORT_ON_FAILURE(NRI.CreateFence(*m_Device, 0, m_FrameFence));
 
-    CreateCommandBuffers();
+    m_DepthFormat = nri::GetSupportedDepthFormat(NRI, *m_Device, 24, false);
 
-    nri::Format swapChainFormat = nri::Format::UNKNOWN;
-    CreateSwapChain(swapChainFormat);
+    { // Swap chain
+        nri::SwapChainDesc swapChainDesc = {};
+        swapChainDesc.window = GetWindow();
+        swapChainDesc.queue = m_GraphicsQueue;
+        swapChainDesc.format = nri::SwapChainFormat::BT709_G22_10BIT;
+        swapChainDesc.flags = (m_Vsync ? nri::SwapChainBits::VSYNC : nri::SwapChainBits::NONE) | nri::SwapChainBits::ALLOW_TEARING;
+        swapChainDesc.width = (uint16_t)GetOutputResolution().x;
+        swapChainDesc.height = (uint16_t)GetOutputResolution().y;
+        swapChainDesc.textureNum = GetOptimalSwapChainTextureNum();
+        swapChainDesc.queuedFrameNum = GetQueuedFrameNum();
+        NRI_ABORT_ON_FAILURE(NRI.CreateSwapChain(*m_Device, swapChainDesc, m_SwapChain));
+    }
 
-    CreateRayTracingPipeline();
-    CreateDescriptorSets();
-    CreateRayTracingOutput(swapChainFormat);
-    CreateBottomLevelAccelerationStructure();
-    CreateTopLevelAccelerationStructure();
-    CreateShaderTable();
-    CreateShaderResources();
+    uint32_t swapChainTextureNum;
+    nri::Texture* const* swapChainTextures = NRI.GetSwapChainTextures(*m_SwapChain, swapChainTextureNum);
 
-    return true;
+    nri::Format swapChainFormat = NRI.GetTextureDesc(*swapChainTextures[0]).format;
+
+    // Queued frames
+    m_QueuedFrames.resize(GetQueuedFrameNum());
+    for (QueuedFrame& queuedFrame : m_QueuedFrames) {
+        NRI_ABORT_ON_FAILURE(NRI.CreateCommandAllocator(*m_GraphicsQueue, queuedFrame.commandAllocator));
+        NRI_ABORT_ON_FAILURE(NRI.CreateCommandBuffer(*queuedFrame.commandAllocator, queuedFrame.commandBuffer));
+    }
+
+    // Pipeline
+    utils::ShaderCodeStorage shaderCodeStorage;
+    {
+        {
+            nri::DescriptorRangeDesc globalDescriptorRange[3] = {};
+            globalDescriptorRange[0] = {0, 1, nri::DescriptorType::CONSTANT_BUFFER, nri::StageBits::ALL};
+            globalDescriptorRange[1] = {0, 1, nri::DescriptorType::SAMPLER, nri::StageBits::FRAGMENT_SHADER};
+            globalDescriptorRange[2] = {0, BUFFER_COUNT, nri::DescriptorType::STRUCTURED_BUFFER, nri::StageBits::ALL};
+
+            // Bindless descriptors
+            nri::DescriptorRangeDesc textureDescriptorRange[1] = {};
+            textureDescriptorRange[0] = {0, 128, nri::DescriptorType::TEXTURE, nri::StageBits::FRAGMENT_SHADER, nri::DescriptorRangeBits::VARIABLE_SIZED_ARRAY | nri::DescriptorRangeBits::PARTIALLY_BOUND};
+
+            nri::DescriptorSetDesc descriptorSetDescs[] = {
+                {0, globalDescriptorRange, helper::GetCountOf(globalDescriptorRange)},
+                {1, textureDescriptorRange, helper::GetCountOf(textureDescriptorRange)},
+            };
+
+            nri::PipelineLayoutDesc pipelineLayoutDesc = {};
+            pipelineLayoutDesc.descriptorSetNum = helper::GetCountOf(descriptorSetDescs);
+            pipelineLayoutDesc.descriptorSets = descriptorSetDescs;
+            pipelineLayoutDesc.shaderStages = nri::StageBits::VERTEX_SHADER | nri::StageBits::FRAGMENT_SHADER;
+
+            // We know that all shaders are not SM 6.8, so emulation is needed for D3D12
+            if (deviceDesc.graphicsAPI == nri::GraphicsAPI::D3D12)
+                pipelineLayoutDesc.flags = nri::PipelineLayoutBits::ENABLE_DRAW_PARAMETERS_EMULATION;
+
+            NRI_ABORT_ON_FAILURE(NRI.CreatePipelineLayout(*m_Device, pipelineLayoutDesc, m_GraphicsPipelineLayout));
+        }
+
+        {
+            nri::DescriptorRangeDesc descriptorRange[2] = {};
+            descriptorRange[0] = {0, 2, nri::DescriptorType::STORAGE_BUFFER, nri::StageBits::COMPUTE_SHADER};
+            descriptorRange[1] = {0, BUFFER_COUNT, nri::DescriptorType::STRUCTURED_BUFFER, nri::StageBits::COMPUTE_SHADER};
+
+            nri::DescriptorSetDesc descriptorSetDescs[] = {
+                {0, descriptorRange, helper::GetCountOf(descriptorRange)},
+            };
+
+            nri::RootConstantDesc rootConstantDesc = {};
+            rootConstantDesc.registerIndex = 0;
+            rootConstantDesc.shaderStages = nri::StageBits::COMPUTE_SHADER;
+            rootConstantDesc.size = sizeof(CullingConstants);
+
+            nri::PipelineLayoutDesc pipelineLayoutDesc = {};
+            pipelineLayoutDesc.rootConstantNum = 1;
+            pipelineLayoutDesc.rootConstants = &rootConstantDesc;
+            pipelineLayoutDesc.descriptorSetNum = helper::GetCountOf(descriptorSetDescs);
+            pipelineLayoutDesc.descriptorSets = descriptorSetDescs;
+            pipelineLayoutDesc.shaderStages = nri::StageBits::COMPUTE_SHADER;
+
+            NRI_ABORT_ON_FAILURE(NRI.CreatePipelineLayout(*m_Device, pipelineLayoutDesc, m_ComputePipelineLayout));
+        }
+
+        nri::VertexStreamDesc vertexStreamDesc = {};
+        vertexStreamDesc.bindingSlot = 0;
+        vertexStreamDesc.stride = deviceDesc.features.extendedDynamicState ? 0 : sizeof(utils::Vertex);
+
+        nri::VertexAttributeDesc vertexAttributeDesc[4] = {};
+        {
+            vertexAttributeDesc[0].format = nri::Format::RGB32_SFLOAT;
+            vertexAttributeDesc[0].offset = offsetof(utils::Vertex, pos);
+            vertexAttributeDesc[0].d3d = {"POSITION", 0};
+            vertexAttributeDesc[0].vk = {0};
+
+            vertexAttributeDesc[1].format = nri::Format::RG16_SFLOAT;
+            vertexAttributeDesc[1].offset = offsetof(utils::Vertex, uv);
+            vertexAttributeDesc[1].d3d = {"TEXCOORD", 0};
+            vertexAttributeDesc[1].vk = {1};
+
+            vertexAttributeDesc[2].format = nri::Format::R10_G10_B10_A2_UNORM;
+            vertexAttributeDesc[2].offset = offsetof(utils::Vertex, N);
+            vertexAttributeDesc[2].d3d = {"NORMAL", 0};
+            vertexAttributeDesc[2].vk = {2};
+
+            vertexAttributeDesc[3].format = nri::Format::R10_G10_B10_A2_UNORM;
+            vertexAttributeDesc[3].offset = offsetof(utils::Vertex, T);
+            vertexAttributeDesc[3].d3d = {"TANGENT", 0};
+            vertexAttributeDesc[3].vk = {3};
+        }
+
+        nri::VertexInputDesc vertexInputDesc = {};
+        vertexInputDesc.attributes = vertexAttributeDesc;
+        vertexInputDesc.attributeNum = (uint8_t)helper::GetCountOf(vertexAttributeDesc);
+        vertexInputDesc.streams = &vertexStreamDesc;
+        vertexInputDesc.streamNum = 1;
+
+        nri::InputAssemblyDesc inputAssemblyDesc = {};
+        inputAssemblyDesc.topology = nri::Topology::TRIANGLE_LIST;
+
+        nri::RasterizationDesc rasterizationDesc = {};
+        rasterizationDesc.fillMode = nri::FillMode::SOLID;
+        rasterizationDesc.cullMode = nri::CullMode::NONE;
+        rasterizationDesc.frontCounterClockwise = true;
+
+        nri::MultisampleDesc multisampleDesc = {};
+        multisampleDesc.sampleNum = 1;
+        multisampleDesc.sampleMask = nri::ALL;
+
+        nri::ColorAttachmentDesc colorAttachmentDesc = {};
+        colorAttachmentDesc.format = swapChainFormat;
+        colorAttachmentDesc.colorWriteMask = nri::ColorWriteBits::RGBA;
+
+        nri::OutputMergerDesc outputMergerDesc = {};
+        outputMergerDesc.colors = &colorAttachmentDesc;
+        outputMergerDesc.colorNum = 1;
+        outputMergerDesc.depthStencilFormat = m_DepthFormat;
+        outputMergerDesc.depth.write = true;
+        outputMergerDesc.depth.compareOp = CLEAR_DEPTH == 1.0f ? nri::CompareOp::LESS : nri::CompareOp::GREATER;
+
+        nri::ShaderDesc shaderStages[] = {
+            utils::LoadShader(deviceDesc.graphicsAPI, "ForwardBindless.vs", shaderCodeStorage),
+            utils::LoadShader(deviceDesc.graphicsAPI, "ForwardBindless.fs", shaderCodeStorage),
+        };
+
+        nri::GraphicsPipelineDesc graphicsPipelineDesc = {};
+        graphicsPipelineDesc.pipelineLayout = m_GraphicsPipelineLayout;
+        graphicsPipelineDesc.vertexInput = &vertexInputDesc;
+        graphicsPipelineDesc.inputAssembly = inputAssemblyDesc;
+        graphicsPipelineDesc.rasterization = rasterizationDesc;
+        graphicsPipelineDesc.multisample = &multisampleDesc;
+        graphicsPipelineDesc.outputMerger = outputMergerDesc;
+        graphicsPipelineDesc.shaders = shaderStages;
+        graphicsPipelineDesc.shaderNum = helper::GetCountOf(shaderStages);
+        NRI_ABORT_ON_FAILURE(NRI.CreateGraphicsPipeline(*m_Device, graphicsPipelineDesc, m_Pipeline));
+    }
+
+    {
+        nri::ComputePipelineDesc computePipelineDesc = {};
+        computePipelineDesc.pipelineLayout = m_ComputePipelineLayout;
+        computePipelineDesc.shader = utils::LoadShader(deviceDesc.graphicsAPI, "GenerateSceneDrawCalls.cs", shaderCodeStorage);
+        NRI_ABORT_ON_FAILURE(NRI.CreateComputePipeline(*m_Device, computePipelineDesc, m_ComputePipeline));
+    }
+
+    if (isFirstTime) {
+        // Scene
+        std::string sceneFile = utils::GetFullPath(m_SceneFile, utils::DataFolder::SCENES);
+        NRI_ABORT_ON_FALSE(utils::LoadScene(sceneFile, m_Scene, false));
+
+        // Camera
+        m_Camera.Initialize(m_Scene.aabb.GetCenter(), m_Scene.aabb.vMin, false);
+    }
+
+    const uint32_t textureNum = (uint32_t)m_Scene.textures.size();
+    const uint32_t materialNum = (uint32_t)m_Scene.materials.size();
+
+    // Textures
+    for (const utils::Texture* textureData : m_Scene.textures) {
+        nri::TextureDesc textureDesc = {};
+        textureDesc.type = nri::TextureType::TEXTURE_2D;
+        textureDesc.usage = nri::TextureUsageBits::SHADER_RESOURCE;
+        textureDesc.format = textureData->GetFormat();
+        textureDesc.width = textureData->GetWidth();
+        textureDesc.height = textureData->GetHeight();
+        textureDesc.mipNum = textureData->GetMipNum();
+        textureDesc.layerNum = textureData->GetArraySize();
+
+        nri::Texture* texture;
+        NRI_ABORT_ON_FAILURE(NRI.CreateTexture(*m_Device, textureDesc, texture));
+        m_Textures.push_back(texture);
+    }
+
+    // Depth attachment
+    nri::Texture* depthTexture;
+    {
+        nri::TextureDesc textureDesc = {};
+        textureDesc.type = nri::TextureType::TEXTURE_2D;
+        textureDesc.usage = nri::TextureUsageBits::DEPTH_STENCIL_ATTACHMENT;
+        textureDesc.format = m_DepthFormat;
+        textureDesc.width = (uint16_t)GetOutputResolution().x;
+        textureDesc.height = (uint16_t)GetOutputResolution().y;
+        textureDesc.mipNum = 1;
+
+        NRI_ABORT_ON_FAILURE(NRI.CreateTexture(*m_Device, textureDesc, depthTexture));
+        m_Textures.push_back(depthTexture);
+    }
+
+    const uint32_t constantBufferSize = helper::Align((uint32_t)sizeof(GlobalConstants), deviceDesc.memoryAlignment.constantBufferOffset);
+
+    { // Buffers
+        // CONSTANT_BUFFER
+        nri::BufferDesc bufferDesc = {};
+        bufferDesc.size = constantBufferSize * GetQueuedFrameNum();
+        bufferDesc.usage = nri::BufferUsageBits::CONSTANT_BUFFER;
+        nri::Buffer* buffer;
+        NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, buffer));
+        m_Buffers.push_back(buffer);
+
+        // READBACK_BUFFER
+        bufferDesc.size = sizeof(nri::PipelineStatisticsDesc) * GetQueuedFrameNum();
+        bufferDesc.usage = nri::BufferUsageBits::NONE;
+        NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, buffer));
+        m_Buffers.push_back(buffer);
+
+        // INDEX_BUFFER
+        bufferDesc.size = helper::GetByteSizeOf(m_Scene.indices);
+        bufferDesc.usage = nri::BufferUsageBits::INDEX_BUFFER;
+        NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, buffer));
+        m_Buffers.push_back(buffer);
+
+        // VERTEX_BUFFER
+        bufferDesc.size = helper::GetByteSizeOf(m_Scene.vertices);
+        bufferDesc.usage = nri::BufferUsageBits::VERTEX_BUFFER;
+        NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, buffer));
+        m_Buffers.push_back(buffer);
+
+        // MATERIAL_BUFFER
+        bufferDesc.size = m_Scene.materials.size() * sizeof(MaterialData);
+        bufferDesc.structureStride = sizeof(MaterialData);
+        bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE;
+        NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, buffer));
+        m_Buffers.push_back(buffer);
+
+        // MESH_BUFFER
+        bufferDesc.size = m_Scene.meshes.size() * sizeof(MeshData);
+        bufferDesc.structureStride = sizeof(MeshData);
+        bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE;
+        NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, buffer));
+        m_Buffers.push_back(buffer);
+
+        // INSTANCE_BUFFER
+        bufferDesc.size = m_Scene.instances.size() * sizeof(InstanceData);
+        bufferDesc.structureStride = sizeof(InstanceData);
+        bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE;
+        NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, buffer));
+        m_Buffers.push_back(buffer);
+
+        // INDIRECT_BUFFER
+        bufferDesc.size = m_Scene.instances.size() * GetDrawIndexedCommandSize();
+        bufferDesc.structureStride = 0;
+        bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::ARGUMENT_BUFFER;
+        NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, buffer));
+        m_Buffers.push_back(buffer);
+
+        // INDIRECT_COUNT_BUFFER
+        bufferDesc.size = sizeof(uint32_t);
+        bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::ARGUMENT_BUFFER;
+        NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, buffer));
+        m_Buffers.push_back(buffer);
+    }
+
+    { // Memory
+        nri::ResourceGroupDesc resourceGroupDesc = {};
+        resourceGroupDesc.memoryLocation = nri::MemoryLocation::HOST_UPLOAD;
+        resourceGroupDesc.bufferNum = 1;
+        resourceGroupDesc.buffers = &m_Buffers[CONSTANT_BUFFER];
+
+        size_t baseAllocation = m_MemoryAllocations.size();
+        m_MemoryAllocations.resize(baseAllocation + 1, nullptr);
+        NRI_ABORT_ON_FAILURE(NRI.AllocateAndBindMemory(*m_Device, resourceGroupDesc, m_MemoryAllocations.data() + baseAllocation));
+
+        resourceGroupDesc.memoryLocation = nri::MemoryLocation::HOST_READBACK;
+        resourceGroupDesc.bufferNum = 1;
+        resourceGroupDesc.buffers = &m_Buffers[READBACK_BUFFER];
+
+        baseAllocation = m_MemoryAllocations.size();
+        m_MemoryAllocations.resize(baseAllocation + 1, nullptr);
+        NRI_ABORT_ON_FAILURE(NRI.AllocateAndBindMemory(*m_Device, resourceGroupDesc, m_MemoryAllocations.data() + baseAllocation));
+
+        resourceGroupDesc.memoryLocation = nri::MemoryLocation::DEVICE;
+        resourceGroupDesc.bufferNum = (uint32_t)SceneBuffers::MAX_NUM - 2;
+        resourceGroupDesc.buffers = &m_Buffers[INDEX_BUFFER];
+        resourceGroupDesc.textureNum = (uint32_t)m_Textures.size();
+        resourceGroupDesc.textures = m_Textures.data();
+
+        baseAllocation = m_MemoryAllocations.size();
+        uint32_t allocationNum = NRI.CalculateAllocationNumber(*m_Device, resourceGroupDesc);
+        m_MemoryAllocations.resize(baseAllocation + allocationNum, nullptr);
+        NRI_ABORT_ON_FAILURE(NRI.AllocateAndBindMemory(*m_Device, resourceGroupDesc, m_MemoryAllocations.data() + baseAllocation));
+    }
+
+    // Create descriptors
+    nri::Descriptor* anisotropicSampler = nullptr;
+    nri::Descriptor* constantBufferViews[8] = {};
+    nri::Descriptor* resourceViews[BUFFER_COUNT] = {};
+    {
+        // Material textures
+        m_Descriptors.resize(textureNum);
+        for (uint32_t i = 0; i < textureNum; i++) {
+            const utils::Texture& texture = *m_Scene.textures[i];
+            nri::TextureViewDesc textureViewDesc = {m_Textures[i], nri::TextureView::TEXTURE, texture.GetFormat()};
+            NRI_ABORT_ON_FAILURE(NRI.CreateTextureView(textureViewDesc, m_Descriptors[i]));
+        }
+
+        // Sampler
+        nri::SamplerDesc samplerDesc = {};
+        samplerDesc.addressModes = {nri::AddressMode::REPEAT, nri::AddressMode::REPEAT};
+        samplerDesc.filters = {nri::Filter::LINEAR, nri::Filter::LINEAR, nri::Filter::LINEAR};
+        samplerDesc.anisotropy = 8;
+        samplerDesc.mipMax = 16.0f;
+        NRI_ABORT_ON_FAILURE(NRI.CreateSampler(*m_Device, samplerDesc, anisotropicSampler));
+        m_Descriptors.push_back(anisotropicSampler);
+
+        nri::BufferViewDesc bufferViewDesc = {};
+        bufferViewDesc.type = nri::BufferView::STRUCTURED_BUFFER;
+
+        // Material buffer
+        bufferViewDesc.buffer = m_Buffers[MATERIAL_BUFFER];
+        bufferViewDesc.size = m_Scene.materials.size() * sizeof(MaterialData);
+        NRI_ABORT_ON_FAILURE(NRI.CreateBufferView(bufferViewDesc, resourceViews[0]));
+        m_Descriptors.push_back(resourceViews[0]);
+
+        // Mesh buffer
+        bufferViewDesc.buffer = m_Buffers[MESH_BUFFER];
+        bufferViewDesc.size = m_Scene.meshes.size() * sizeof(MeshData);
+        NRI_ABORT_ON_FAILURE(NRI.CreateBufferView(bufferViewDesc, resourceViews[1]));
+        m_Descriptors.push_back(resourceViews[1]);
+
+        // Instance buffer
+        bufferViewDesc.buffer = m_Buffers[INSTANCE_BUFFER];
+        bufferViewDesc.size = m_Scene.instances.size() * sizeof(InstanceData);
+        NRI_ABORT_ON_FAILURE(NRI.CreateBufferView(bufferViewDesc, resourceViews[2]));
+        m_Descriptors.push_back(resourceViews[2]);
+
+        // Indirect buffer
+        bufferViewDesc.type = nri::BufferView::STORAGE_BUFFER;
+        bufferViewDesc.buffer = m_Buffers[INDIRECT_BUFFER];
+        bufferViewDesc.size = m_Scene.instances.size() * GetDrawIndexedCommandSize();
+        bufferViewDesc.format = nri::Format::R32_UINT;
+        NRI_ABORT_ON_FAILURE(NRI.CreateBufferView(bufferViewDesc, m_IndirectBufferShaderStorage));
+        m_Descriptors.push_back(m_IndirectBufferShaderStorage);
+
+        // Indirect draw count buffer
+        bufferViewDesc.type = nri::BufferView::STORAGE_BUFFER;
+        bufferViewDesc.buffer = m_Buffers[INDIRECT_COUNT_BUFFER];
+        bufferViewDesc.size = sizeof(uint32_t);
+        bufferViewDesc.format = nri::Format::R32_UINT;
+        NRI_ABORT_ON_FAILURE(NRI.CreateBufferView(bufferViewDesc, m_IndirectBufferCountShaderStorage));
+        m_Descriptors.push_back(m_IndirectBufferCountShaderStorage);
+
+        bufferViewDesc.format = nri::Format::UNKNOWN;
+
+        // Constant buffer
+        for (uint32_t i = 0; i < GetQueuedFrameNum(); i++) {
+            m_QueuedFrames[i].globalConstantBufferViewOffsets = i * constantBufferSize;
+            bufferViewDesc.buffer = m_Buffers[CONSTANT_BUFFER];
+            bufferViewDesc.type = nri::BufferView::CONSTANT_BUFFER;
+            bufferViewDesc.offset = i * constantBufferSize;
+            bufferViewDesc.size = constantBufferSize;
+            NRI_ABORT_ON_FAILURE(NRI.CreateBufferView(bufferViewDesc, constantBufferViews[i]));
+            m_Descriptors.push_back(constantBufferViews[i]);
+        }
+
+        // Swap chain
+        for (uint32_t i = 0; i < swapChainTextureNum; i++) {
+            nri::TextureViewDesc textureViewDesc = {swapChainTextures[i], nri::TextureView::COLOR_ATTACHMENT, swapChainFormat};
+
+            nri::Descriptor* colorAttachment = nullptr;
+            NRI_ABORT_ON_FAILURE(NRI.CreateTextureView(textureViewDesc, colorAttachment));
+
+            nri::Fence* acquireSemaphore = nullptr;
+            NRI_ABORT_ON_FAILURE(NRI.CreateFence(*m_Device, nri::SWAPCHAIN_SEMAPHORE, acquireSemaphore));
+
+            nri::Fence* releaseSemaphore = nullptr;
+            NRI_ABORT_ON_FAILURE(NRI.CreateFence(*m_Device, nri::SWAPCHAIN_SEMAPHORE, releaseSemaphore));
+
+            SwapChainTexture& swapChainTexture = m_SwapChainTextures.emplace_back();
+
+            swapChainTexture = {};
+            swapChainTexture.acquireSemaphore = acquireSemaphore;
+            swapChainTexture.releaseSemaphore = releaseSemaphore;
+            swapChainTexture.texture = swapChainTextures[i];
+            swapChainTexture.colorAttachment = colorAttachment;
+            swapChainTexture.attachmentFormat = swapChainFormat;
+        }
+
+        // Depth buffer
+        nri::TextureViewDesc textureViewDesc = {depthTexture, nri::TextureView::DEPTH_STENCIL_ATTACHMENT, m_DepthFormat};
+
+        NRI_ABORT_ON_FAILURE(NRI.CreateTextureView(textureViewDesc, m_DepthAttachment));
+        m_Descriptors.push_back(m_DepthAttachment);
+    }
+
+#define TEST 100
+
+    { // Descriptor pool
+        nri::DescriptorPoolDesc descriptorPoolDesc = {};
+        descriptorPoolDesc.descriptorSetMaxNum = materialNum + GetQueuedFrameNum() + 2;
+        descriptorPoolDesc.textureMaxNum = textureNum;
+        descriptorPoolDesc.samplerMaxNum = GetQueuedFrameNum();
+        descriptorPoolDesc.storageStructuredBufferMaxNum = 1 * 2 * TEST;
+        descriptorPoolDesc.storageBufferMaxNum = 1 * 2 * TEST;
+        descriptorPoolDesc.bufferMaxNum = 3 * 2 * TEST;
+        descriptorPoolDesc.structuredBufferMaxNum = 4 * 2 * TEST;
+        descriptorPoolDesc.constantBufferMaxNum = GetQueuedFrameNum();
+
+        NRI_ABORT_ON_FAILURE(NRI.CreateDescriptorPool(*m_Device, descriptorPoolDesc, m_DescriptorPool));
+    }
+
+    { // Descriptor sets
+        m_DescriptorSets.resize(GetQueuedFrameNum() + 2);
+
+        // Global
+        NRI_ABORT_ON_FAILURE(NRI.AllocateDescriptorSets(*m_DescriptorPool, *m_GraphicsPipelineLayout, GLOBAL_DESCRIPTOR_SET,
+            &m_DescriptorSets[0], GetQueuedFrameNum(), 0));
+
+        for (uint32_t i = 0; i < GetQueuedFrameNum(); i++) {
+            nri::UpdateDescriptorRangeDesc updateDescriptorRangeDescs[] = {
+                {m_DescriptorSets[i], 0, 0, &constantBufferViews[i], 1},
+                {m_DescriptorSets[i], 1, 0, &anisotropicSampler, 1},
+                {m_DescriptorSets[i], 2, 0, resourceViews, BUFFER_COUNT},
+            };
+
+            NRI.UpdateDescriptorRanges(updateDescriptorRangeDescs, helper::GetCountOf(updateDescriptorRangeDescs));
+        }
+
+        // Material
+        NRI_ABORT_ON_FAILURE(NRI.AllocateDescriptorSets(*m_DescriptorPool, *m_GraphicsPipelineLayout, MATERIAL_DESCRIPTOR_SET, &m_DescriptorSets[GetQueuedFrameNum()], 1, textureNum));
+
+        nri::UpdateDescriptorRangeDesc updateDescriptorRangeDesc = {m_DescriptorSets[GetQueuedFrameNum()], 0, 0, m_Descriptors.data(), textureNum};
+        NRI.UpdateDescriptorRanges(&updateDescriptorRangeDesc, 1);
+
+        // Culling
+        NRI_ABORT_ON_FAILURE(NRI.AllocateDescriptorSets(*m_DescriptorPool, *m_ComputePipelineLayout, 0, &m_DescriptorSets[GetQueuedFrameNum() + 1], 1, 0));
+
+        nri::Descriptor* storageDescriptors[2] = {m_IndirectBufferCountShaderStorage, m_IndirectBufferShaderStorage};
+
+        nri::UpdateDescriptorRangeDesc rangeUpdateDescs[] = {
+            {m_DescriptorSets[GetQueuedFrameNum() + 1], 0, 0, storageDescriptors, helper::GetCountOf(storageDescriptors)},
+            {m_DescriptorSets[GetQueuedFrameNum() + 1], 1, 0, resourceViews, BUFFER_COUNT},
+        };
+        NRI.UpdateDescriptorRanges(rangeUpdateDescs, helper::GetCountOf(rangeUpdateDescs));
+    }
+
+    { // Upload data
+        std::vector<nri::TextureUploadDesc> textureData(1 + textureNum);
+        std::vector<MaterialData> materialData(m_Scene.materials.size());
+        std::vector<InstanceData> instanceData(m_Scene.instances.size());
+        std::vector<MeshData> meshData(m_Scene.meshes.size());
+
+        for (size_t i = 0; i < m_Scene.materials.size(); i++) {
+            MaterialData& data = materialData[i];
+            utils::Material& material = m_Scene.materials[i];
+            data.baseColorAndMetallic = material.baseColorAndMetalnessScale;
+            data.emissiveColorAndRoughness = material.emissiveAndRoughnessScale;
+            data.baseColorTexIndex = material.baseColorTexIndex;
+            data.roughnessMetalnessTexIndex = material.roughnessMetalnessTexIndex;
+            data.normalTexIndex = material.normalTexIndex;
+            data.emissiveTexIndex = material.emissiveTexIndex;
+        }
+
+        for (size_t i = 0; i < m_Scene.instances.size(); i++) {
+            InstanceData& data = instanceData[i];
+            utils::Instance& instance = m_Scene.instances[i];
+            data.materialIndex = instance.materialIndex;
+            data.meshIndex = m_Scene.meshInstances[instance.meshInstanceIndex].meshIndex;
+            // TODO: use quaternions or float3x4 matrix instead
+            // DecomposeProjection
+            // data.position = float3(instance.position.x, instance.position.y, instance.position.z);
+            // data.scale = instance.scale;
+            // data.rotation = instance.rotation;
+        }
+
+        for (size_t i = 0; i < m_Scene.meshes.size(); i++) {
+            MeshData& data = meshData[i];
+            utils::Mesh& mesh = m_Scene.meshes[i];
+            data.idxCount = mesh.indexNum;
+            data.idxOffset = mesh.indexOffset;
+            data.vtxCount = mesh.vertexNum;
+            data.vtxOffset = mesh.vertexOffset;
+        }
+
+        uint32_t subresourceNum = 0;
+        for (uint32_t i = 0; i < textureNum; i++) {
+            const utils::Texture& texture = *m_Scene.textures[i];
+            subresourceNum += texture.GetArraySize() * texture.GetMipNum();
+        }
+
+        std::vector<nri::TextureSubresourceUploadDesc> subresources(subresourceNum);
+        ;
+        nri::TextureSubresourceUploadDesc* subresourceBegin = subresources.data();
+
+        textureData[0] = {};
+        textureData[0].subresources = nullptr;
+        textureData[0].texture = depthTexture;
+        textureData[0].after = {nri::AccessBits::DEPTH_STENCIL_ATTACHMENT_WRITE, nri::Layout::DEPTH_STENCIL_ATTACHMENT};
+
+        for (uint32_t i = 0; i < textureNum; i++) {
+            const utils::Texture& texture = *m_Scene.textures[i];
+
+            for (uint32_t slice = 0; slice < texture.GetArraySize(); slice++) {
+                for (uint32_t mip = 0; mip < texture.GetMipNum(); mip++)
+                    texture.GetSubresource(subresourceBegin[slice * texture.GetMipNum() + mip], mip, slice);
+            }
+
+            const uint32_t j = i + 1;
+            textureData[j] = {};
+            textureData[j].subresources = subresourceBegin;
+            textureData[j].texture = m_Textures[i];
+            textureData[j].after = {nri::AccessBits::SHADER_RESOURCE, nri::Layout::SHADER_RESOURCE};
+
+            subresourceBegin += texture.GetArraySize() * texture.GetMipNum();
+        }
+
+        nri::BufferUploadDesc bufferData[] = {
+            {
+                nullptr,
+                m_Buffers[INDIRECT_BUFFER],
+                {nri::AccessBits::ARGUMENT_BUFFER, nri::StageBits::INDIRECT},
+            },
+            {
+                meshData.data(),
+                m_Buffers[MESH_BUFFER],
+                {nri::AccessBits::SHADER_RESOURCE, nri::StageBits::FRAGMENT_SHADER | nri::StageBits::COMPUTE_SHADER},
+            },
+            {
+                materialData.data(),
+                m_Buffers[MATERIAL_BUFFER],
+                {nri::AccessBits::SHADER_RESOURCE, nri::StageBits::FRAGMENT_SHADER | nri::StageBits::COMPUTE_SHADER},
+            },
+            {
+                instanceData.data(),
+                m_Buffers[INSTANCE_BUFFER],
+                {nri::AccessBits::SHADER_RESOURCE, nri::StageBits::FRAGMENT_SHADER | nri::StageBits::COMPUTE_SHADER},
+            },
+            {
+                m_Scene.vertices.data(),
+                m_Buffers[VERTEX_BUFFER],
+                {nri::AccessBits::VERTEX_BUFFER},
+            },
+            {
+                m_Scene.indices.data(),
+                m_Buffers[INDEX_BUFFER],
+                {nri::AccessBits::INDEX_BUFFER},
+            },
+        };
+
+        NRI_ABORT_ON_FAILURE(NRI.UploadData(*m_GraphicsQueue, textureData.data(), (uint32_t)textureData.size(), bufferData, helper::GetCountOf(bufferData)));
+    }
+
+    // Pipeline statistics
+    if (deviceDesc.features.pipelineStatistics) {
+        nri::QueryPoolDesc queryPoolDesc = {};
+        queryPoolDesc.queryType = nri::QueryType::PIPELINE_STATISTICS;
+        queryPoolDesc.capacity = 1;
+
+        NRI_ABORT_ON_FAILURE(NRI.CreateQueryPool(*m_Device, queryPoolDesc, m_QueryPool));
+    }
+
+    // Keep data for "DEVICE_LOST" testing
+    // m_Scene.UnloadGeometryData();
+    // m_Scene.UnloadTextureData();
+
+    m_UseGPUDrawGeneration = deviceDesc.features.drawIndirectCount != 0;
+
+    // Ray Tracing
+    {
+        if (deviceDesc.tiers.rayTracing == 0) {
+            printf("Ray tracing is not supported!\n");
+            exit(0);
+        }
+
+        NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::RayTracingInterface), (nri::RayTracingInterface*)&NRI));
+
+        CreateRayTracingPipeline();
+
+        NRI_ABORT_ON_FAILURE(NRI.AllocateDescriptorSets(*m_DescriptorPool, *m_RayTracingPipelineLayout, 0, &m_RayTracingDescriptorSet, 1, 0));
+
+        CreateBottomLevelAccelerationStructure();
+        CreateTopLevelAccelerationStructure();
+        CreateShaderTable();
+    }
+
+    return InitImgui(*m_Device);
 }
 
 void Sample::LatencySleep(uint32_t frameIndex) {
@@ -319,9 +829,60 @@ void Sample::LatencySleep(uint32_t frameIndex) {
     NRI.ResetCommandAllocator(*queuedFrame.commandAllocator);
 }
 
+void Sample::PrepareFrame(uint32_t frameIndex) {
+    const nri::DeviceDesc& deviceDesc = NRI.GetDeviceDesc(*m_Device);
+
+    if (IsHalfTimeLimitReached() && deviceDesc.features.drawIndirectCount)
+        m_UseGPUDrawGeneration = !m_UseGPUDrawGeneration;
+
+    ImGui::NewFrame();
+    {
+        nri::PipelineStatisticsDesc* pipelineStats = (nri::PipelineStatisticsDesc*)NRI.MapBuffer(*m_Buffers[READBACK_BUFFER], 0, sizeof(nri::PipelineStatisticsDesc));
+
+        ImGui::SetNextWindowPos(ImVec2(30, 30), ImGuiCond_Once);
+        ImGui::SetNextWindowSize(ImVec2(0, 0));
+        ImGui::Begin("Stats");
+        {
+            ImGui::Text("Input vertices               : %" PRIu64, pipelineStats->inputVertexNum);
+            ImGui::Text("Input primitives             : %" PRIu64, pipelineStats->inputPrimitiveNum);
+            ImGui::Text("Vertex shader invocations    : %" PRIu64, pipelineStats->vertexShaderInvocationNum);
+            ImGui::Text("Rasterizer input primitives  : %" PRIu64, pipelineStats->rasterizerInPrimitiveNum);
+            ImGui::Text("Rasterizer output primitives : %" PRIu64, pipelineStats->rasterizerOutPrimitiveNum);
+            ImGui::Text("Fragment shader invocations  : %" PRIu64, pipelineStats->fragmentShaderInvocationNum);
+
+            ImGui::BeginDisabled(!deviceDesc.features.drawIndirectCount);
+            ImGui::Checkbox("GPU draw call generation", &m_UseGPUDrawGeneration);
+            ImGui::EndDisabled();
+
+#ifdef _WIN32
+            if (deviceDesc.graphicsAPI == nri::GraphicsAPI::D3D12 && ImGui::Button("Trigger DEVICE_LOST")) {
+                ID3D12Device5* device = (ID3D12Device5*)NRI.GetDeviceNativeObject(m_Device);
+                device->RemoveDevice();
+            }
+#endif
+        }
+        ImGui::End();
+
+        NRI.UnmapBuffer(*m_Buffers[READBACK_BUFFER]);
+    }
+    ImGui::EndFrame();
+    ImGui::Render();
+
+    CameraDesc desc = {};
+    desc.aspectRatio = float(GetOutputResolution().x) / float(GetOutputResolution().y);
+    desc.horizontalFov = 90.0f;
+    desc.nearZ = 0.1f;
+    desc.isReversedZ = (CLEAR_DEPTH == 0.0f);
+    GetCameraDescFromInputDevices(desc);
+
+    m_Camera.Update(desc, frameIndex);
+}
+
 void Sample::RenderFrame(uint32_t frameIndex) {
     uint32_t queuedFrameIndex = frameIndex % GetQueuedFrameNum();
     const QueuedFrame& queuedFrame = m_QueuedFrames[queuedFrameIndex];
+    const uint32_t windowWidth = GetOutputResolution().x;
+    const uint32_t windowHeight = GetOutputResolution().y;
 
     // Acquire a swap chain texture
     uint32_t recycledSemaphoreIndex = frameIndex % (uint32_t)m_SwapChainTextures.size();
@@ -332,155 +893,207 @@ void Sample::RenderFrame(uint32_t frameIndex) {
 
     const SwapChainTexture& swapChainTexture = m_SwapChainTextures[currentSwapChainTextureIndex];
 
-    m_BackBuffer = &m_SwapChainTextures[currentSwapChainTextureIndex];
+    // Update constants
+    const uint64_t rangeOffset = m_QueuedFrames[queuedFrameIndex].globalConstantBufferViewOffsets;
+    auto constants = (GlobalConstants*)NRI.MapBuffer(*m_Buffers[CONSTANT_BUFFER], rangeOffset, sizeof(GlobalConstants));
+    if (constants) {
+        constants->gWorldToClip = m_Camera.state.mWorldToClip * m_Scene.mSceneToWorld;
+        constants->gCameraPos = m_Camera.state.position;
+
+        NRI.UnmapBuffer(*m_Buffers[CONSTANT_BUFFER]);
+    }
 
     // Record
-    nri::TextureBarrierDesc textureTransitions[2] = {};
-    nri::BarrierDesc barrierDesc = {};
-
     nri::CommandBuffer& commandBuffer = *queuedFrame.commandBuffer;
     NRI.BeginCommandBuffer(commandBuffer, m_DescriptorPool);
     {
-        // Rendering
-        textureTransitions[0].texture = m_BackBuffer->texture;
-        textureTransitions[0].after = {nri::AccessBits::COPY_DESTINATION, nri::Layout::COPY_DESTINATION};
-        textureTransitions[0].layerNum = 1;
-        textureTransitions[0].mipNum = 1;
+        helper::Annotation annotation(NRI, commandBuffer, "Scene");
 
-        textureTransitions[1].texture = m_RayTracingOutput;
-        textureTransitions[1].before = {frameIndex == 0 ? nri::AccessBits::NONE : nri::AccessBits::COPY_SOURCE, frameIndex == 0 ? nri::Layout::UNDEFINED : nri::Layout::COPY_SOURCE};
-        textureTransitions[1].after = {nri::AccessBits::SHADER_RESOURCE_STORAGE, nri::Layout::SHADER_RESOURCE_STORAGE};
-        textureTransitions[1].layerNum = 1;
-        textureTransitions[1].mipNum = 1;
+        nri::AttachmentDesc colorAttachmentDesc = {};
+        colorAttachmentDesc.descriptor = swapChainTexture.colorAttachment;
 
-        barrierDesc.textures = textureTransitions;
-        barrierDesc.textureNum = 2;
+        nri::RenderingDesc renderingDesc = {};
+        renderingDesc.colorNum = 1;
+        renderingDesc.colors = &colorAttachmentDesc;
+        renderingDesc.depth.descriptor = m_DepthAttachment;
 
-        nri::BufferBarrierDesc bufferBarrier = {};
-        if (frameIndex == 0) {
-            bufferBarrier.buffer = m_ShaderTable;
-            bufferBarrier.after = {nri::AccessBits::SHADER_BINDING_TABLE, nri::StageBits::RAYGEN_SHADER};
+        // Barriers
+        nri::TextureBarrierDesc textureBarrier = {};
+        textureBarrier.texture = swapChainTexture.texture;
+        textureBarrier.after = {nri::AccessBits::COLOR_ATTACHMENT, nri::Layout::COLOR_ATTACHMENT};
 
-            barrierDesc.bufferNum = 1;
-            barrierDesc.buffers = &bufferBarrier;
+        nri::BufferBarrierDesc bufferBarriers[2] = {};
+
+        bufferBarriers[0].buffer = m_Buffers[INDIRECT_BUFFER];
+        bufferBarriers[0].before = {nri::AccessBits::ARGUMENT_BUFFER, nri::StageBits::INDIRECT};
+        bufferBarriers[0].after = {nri::AccessBits::SHADER_RESOURCE_STORAGE, nri::StageBits::COMPUTE_SHADER};
+
+        bufferBarriers[1].buffer = m_Buffers[INDIRECT_COUNT_BUFFER];
+        bufferBarriers[1].before = {nri::AccessBits::ARGUMENT_BUFFER, nri::StageBits::INDIRECT};
+        bufferBarriers[1].after = {nri::AccessBits::SHADER_RESOURCE_STORAGE, nri::StageBits::COMPUTE_SHADER};
+
+        nri::BarrierDesc computeBarrierGroupDesc = {};
+        computeBarrierGroupDesc.bufferNum = helper::GetCountOf(bufferBarriers);
+        computeBarrierGroupDesc.buffers = bufferBarriers;
+
+        nri::BarrierDesc barrierDesc = {};
+        barrierDesc.textureNum = 1;
+        barrierDesc.textures = &textureBarrier;
+
+        if (m_UseGPUDrawGeneration) {
+            barrierDesc.bufferNum = helper::GetCountOf(bufferBarriers);
+            barrierDesc.buffers = bufferBarriers;
         }
 
         NRI.CmdBarrier(commandBuffer, barrierDesc);
-        NRI.CmdSetPipelineLayout(commandBuffer, nri::BindPoint::RAY_TRACING, *m_PipelineLayout);
-        NRI.CmdSetPipeline(commandBuffer, *m_Pipeline);
 
-        for (uint32_t i = 0; i < helper::GetCountOf(m_DescriptorSets); i++) {
-            nri::SetDescriptorSetDesc descriptorSet = {i, m_DescriptorSets[i]};
-            NRI.CmdSetDescriptorSet(commandBuffer, descriptorSet);
+        // Simple culling (actually no culling)
+        if (m_UseGPUDrawGeneration) {
+            CullingConstants cullingConstants = {};
+            cullingConstants.DrawCount = (uint32_t)m_Scene.instances.size();
+
+            NRI.CmdSetPipelineLayout(commandBuffer, nri::BindPoint::COMPUTE, *m_ComputePipelineLayout);
+
+            nri::SetDescriptorSetDesc descriptorSet0 = {0, m_DescriptorSets[GetQueuedFrameNum() + 1]};
+            NRI.CmdSetDescriptorSet(commandBuffer, descriptorSet0);
+
+            nri::SetRootConstantsDesc rootConstants = {0, &cullingConstants, sizeof(cullingConstants)};
+            NRI.CmdSetRootConstants(commandBuffer, rootConstants);
+
+            NRI.CmdSetPipeline(commandBuffer, *m_ComputePipeline);
+            NRI.CmdDispatch(commandBuffer, {1, 1, 1});
+
+            // Transition from UAV to indirect argument
+            bufferBarriers[0].before = bufferBarriers[0].after;
+            bufferBarriers[0].after = {nri::AccessBits::ARGUMENT_BUFFER, nri::StageBits::INDIRECT};
+
+            bufferBarriers[1].before = bufferBarriers[1].after;
+            bufferBarriers[1].after = {nri::AccessBits::ARGUMENT_BUFFER, nri::StageBits::INDIRECT};
+
+            NRI.CmdBarrier(commandBuffer, computeBarrierGroupDesc);
         }
 
-        nri::DispatchRaysDesc dispatchRaysDesc = {};
-        dispatchRaysDesc.raygenShader = {m_ShaderTable, 0, m_ShaderGroupIdentifierSize, m_ShaderGroupIdentifierSize};
-        dispatchRaysDesc.missShaders = {m_ShaderTable, m_MissShaderOffset, m_ShaderGroupIdentifierSize, m_ShaderGroupIdentifierSize};
-        dispatchRaysDesc.hitShaderGroups = {m_ShaderTable, m_HitShaderGroupOffset, m_ShaderGroupIdentifierSize, m_ShaderGroupIdentifierSize};
-        dispatchRaysDesc.x = (uint16_t)GetOutputResolution().x;
-        dispatchRaysDesc.y = (uint16_t)GetOutputResolution().y;
-        dispatchRaysDesc.z = 1;
-        NRI.CmdDispatchRays(commandBuffer, dispatchRaysDesc);
+        // Test pipeline stats query
+        if (m_QueryPool) {
+            NRI.CmdResetQueries(commandBuffer, *m_QueryPool, 0, 1);
+            NRI.CmdBeginQuery(commandBuffer, *m_QueryPool, 0);
+        }
 
-        // Copy
-        textureTransitions[1].before = textureTransitions[1].after;
-        textureTransitions[1].after = {nri::AccessBits::COPY_SOURCE, nri::Layout::COPY_SOURCE};
+        { // Rendering
+            NRI.CmdBeginRendering(commandBuffer, renderingDesc);
+            {
+                nri::ClearAttachmentDesc clearDescs[2] = {};
+                clearDescs[0].planes = nri::PlaneBits::COLOR;
+                clearDescs[0].value.color.f = {0.0f, 0.63f, 1.0f};
+                clearDescs[1].planes = nri::PlaneBits::DEPTH;
+                clearDescs[1].value.depthStencil.depth = CLEAR_DEPTH;
 
-        barrierDesc.textures = textureTransitions + 1;
-        barrierDesc.textureNum = 1;
+                NRI.CmdClearAttachments(commandBuffer, clearDescs, helper::GetCountOf(clearDescs), nullptr, 0);
+
+                const nri::Viewport viewport = {0.0f, 0.0f, (float)windowWidth, (float)windowHeight, 0.0f, 1.0f};
+                NRI.CmdSetViewports(commandBuffer, &viewport, 1);
+
+                const nri::Rect scissor = {0, 0, (nri::Dim_t)windowWidth, (nri::Dim_t)windowHeight};
+                NRI.CmdSetScissors(commandBuffer, &scissor, 1);
+
+                NRI.CmdSetPipelineLayout(commandBuffer, nri::BindPoint::GRAPHICS, *m_GraphicsPipelineLayout);
+
+                nri::SetDescriptorSetDesc globalSet = {GLOBAL_DESCRIPTOR_SET, m_DescriptorSets[queuedFrameIndex]};
+                NRI.CmdSetDescriptorSet(commandBuffer, globalSet);
+
+                nri::SetDescriptorSetDesc materialSet = {MATERIAL_DESCRIPTOR_SET, m_DescriptorSets[GetQueuedFrameNum()]};
+                NRI.CmdSetDescriptorSet(commandBuffer, materialSet);
+
+                NRI.CmdSetPipeline(commandBuffer, *m_Pipeline);
+                NRI.CmdSetIndexBuffer(commandBuffer, *m_Buffers[INDEX_BUFFER], 0, sizeof(utils::Index) == 2 ? nri::IndexType::UINT16 : nri::IndexType::UINT32);
+
+                nri::VertexBufferDesc vertexBufferDesc = {};
+                vertexBufferDesc.buffer = m_Buffers[VERTEX_BUFFER];
+                vertexBufferDesc.offset = 0;
+                vertexBufferDesc.stride = sizeof(utils::Vertex);
+                NRI.CmdSetVertexBuffers(commandBuffer, 0, &vertexBufferDesc, 1);
+
+                if (m_UseGPUDrawGeneration) {
+                    NRI.CmdDrawIndexedIndirect(commandBuffer, *m_Buffers[INDIRECT_BUFFER], 0, (uint32_t)m_Scene.instances.size(), GetDrawIndexedCommandSize(), m_Buffers[INDIRECT_COUNT_BUFFER], 0);
+                } else {
+                    for (uint32_t i = 0; i < m_Scene.instances.size(); i++) {
+                        const utils::Instance& instance = m_Scene.instances[i];
+                        const utils::Mesh& mesh = m_Scene.meshes[instance.meshInstanceIndex];
+                        NRI.CmdDrawIndexed(commandBuffer, {mesh.indexNum, 1, mesh.indexOffset, (int32_t)mesh.vertexOffset, i});
+                    }
+                }
+            }
+            NRI.CmdEndRendering(commandBuffer);
+        }
+
+        // End query
+        if (m_QueryPool) {
+            NRI.CmdEndQuery(commandBuffer, *m_QueryPool, 0);
+            NRI.CmdCopyQueries(commandBuffer, *m_QueryPool, 0, 1, *m_Buffers[READBACK_BUFFER], 0);
+        }
+
+        // UI
+        renderingDesc.depth.descriptor = nullptr;
+
+        CmdCopyImguiData(commandBuffer, *m_Streamer);
+
+        NRI.CmdBeginRendering(commandBuffer, renderingDesc);
+        {
+            CmdDrawImgui(commandBuffer, swapChainTexture.attachmentFormat, 1.0f, true);
+        }
+        NRI.CmdEndRendering(commandBuffer);
+
+        // Barriers
+        textureBarrier.before = textureBarrier.after;
+        textureBarrier.after = {nri::AccessBits::NONE, nri::Layout::PRESENT, nri::StageBits::NONE};
+
         barrierDesc.bufferNum = 0;
-
-        NRI.CmdBarrier(commandBuffer, barrierDesc);
-        NRI.CmdCopyTexture(commandBuffer, *m_BackBuffer->texture, nullptr, *m_RayTracingOutput, nullptr);
-
-        // Present
-        textureTransitions[0].before = textureTransitions[0].after;
-        textureTransitions[0].after = {nri::AccessBits::NONE, nri::Layout::PRESENT, nri::StageBits::NONE};
-
-        barrierDesc.textures = textureTransitions;
-        barrierDesc.textureNum = 1;
-
         NRI.CmdBarrier(commandBuffer, barrierDesc);
     }
     NRI.EndCommandBuffer(commandBuffer);
 
     { // Submit
-        nri::FenceSubmitDesc frameFence = {};
-        frameFence.fence = m_FrameFence;
-        frameFence.value = 1 + frameIndex;
-
         nri::FenceSubmitDesc textureAcquiredFence = {};
         textureAcquiredFence.fence = swapChainAcquireSemaphore;
-        textureAcquiredFence.stages = nri::StageBits::ALL;
+        textureAcquiredFence.stages = nri::StageBits::COLOR_ATTACHMENT;
 
         nri::FenceSubmitDesc renderingFinishedFence = {};
         renderingFinishedFence.fence = swapChainTexture.releaseSemaphore;
-
-        nri::FenceSubmitDesc signalFences[] = {renderingFinishedFence, frameFence};
 
         nri::QueueSubmitDesc queueSubmitDesc = {};
         queueSubmitDesc.waitFences = &textureAcquiredFence;
         queueSubmitDesc.waitFenceNum = 1;
         queueSubmitDesc.commandBuffers = &queuedFrame.commandBuffer;
         queueSubmitDesc.commandBufferNum = 1;
-        queueSubmitDesc.signalFences = signalFences;
-        queueSubmitDesc.signalFenceNum = helper::GetCountOf(signalFences);
+        queueSubmitDesc.signalFences = &renderingFinishedFence;
+        queueSubmitDesc.signalFenceNum = 1;
 
         NRI.QueueSubmit(*m_GraphicsQueue, queueSubmitDesc);
     }
 
+    NRI.EndStreamerFrame(*m_Streamer);
+
     // Present
-    NRI.QueuePresent(*m_SwapChain, *swapChainTexture.releaseSemaphore);
-}
+    nri::Result result = NRI.QueuePresent(*m_SwapChain, *swapChainTexture.releaseSemaphore);
 
-void Sample::CreateSwapChain(nri::Format& swapChainFormat) {
-    nri::SwapChainDesc swapChainDesc = {};
-    swapChainDesc.window = GetWindow();
-    swapChainDesc.queue = m_GraphicsQueue;
-    swapChainDesc.format = nri::SwapChainFormat::BT709_G22_8BIT;
-    swapChainDesc.flags = (m_Vsync ? nri::SwapChainBits::VSYNC : nri::SwapChainBits::NONE) | nri::SwapChainBits::ALLOW_TEARING;
-    swapChainDesc.width = (uint16_t)GetOutputResolution().x;
-    swapChainDesc.height = (uint16_t)GetOutputResolution().y;
-    swapChainDesc.textureNum = GetOptimalSwapChainTextureNum();
-    swapChainDesc.queuedFrameNum = GetQueuedFrameNum();
+    // Handle "DEVICE_LOST"
+    if (result == nri::Result::DEVICE_LOST) {
+        Destroy();
+        Initialize(nri::GraphicsAPI::D3D12, false);
 
-    NRI_ABORT_ON_FAILURE(NRI.CreateSwapChain(*m_Device, swapChainDesc, m_SwapChain));
-
-    uint32_t swapChainTextureNum = 0;
-    nri::Texture* const* swapChainTextures = NRI.GetSwapChainTextures(*m_SwapChain, swapChainTextureNum);
-
-    swapChainFormat = NRI.GetTextureDesc(*swapChainTextures[0]).format;
-
-    m_SwapChainTextures.clear();
-    for (uint32_t i = 0; i < swapChainTextureNum; i++) {
-        nri::TextureViewDesc textureViewDesc = {swapChainTextures[i], nri::TextureView::COLOR_ATTACHMENT, swapChainFormat};
-
-        nri::Descriptor* colorAttachment = nullptr;
-        NRI_ABORT_ON_FAILURE(NRI.CreateTextureView(textureViewDesc, colorAttachment));
-
-        nri::Fence* acquireSemaphore = nullptr;
-        NRI_ABORT_ON_FAILURE(NRI.CreateFence(*m_Device, nri::SWAPCHAIN_SEMAPHORE, acquireSemaphore));
-
-        nri::Fence* releaseSemaphore = nullptr;
-        NRI_ABORT_ON_FAILURE(NRI.CreateFence(*m_Device, nri::SWAPCHAIN_SEMAPHORE, releaseSemaphore));
-
-        SwapChainTexture& swapChainTexture = m_SwapChainTextures.emplace_back();
-
-        swapChainTexture = {};
-        swapChainTexture.acquireSemaphore = acquireSemaphore;
-        swapChainTexture.releaseSemaphore = releaseSemaphore;
-        swapChainTexture.texture = swapChainTextures[i];
-        swapChainTexture.colorAttachment = colorAttachment;
-        swapChainTexture.attachmentFormat = swapChainFormat;
+        // "m_FrameFence" must be signaled as usual, because of "Wait" in "LatencySleep"
     }
-}
 
-void Sample::CreateCommandBuffers() {
-    m_QueuedFrames.resize(GetQueuedFrameNum());
-    for (QueuedFrame& queuedFrame : m_QueuedFrames) {
-        NRI_ABORT_ON_FAILURE(NRI.CreateCommandAllocator(*m_GraphicsQueue, queuedFrame.commandAllocator));
-        NRI_ABORT_ON_FAILURE(NRI.CreateCommandBuffer(*queuedFrame.commandAllocator, queuedFrame.commandBuffer));
+    { // Signaling after "Present" improves D3D11 performance a bit
+        nri::FenceSubmitDesc signalFence = {};
+        signalFence.fence = m_FrameFence;
+        signalFence.value = 1 + frameIndex;
+
+        nri::QueueSubmitDesc queueSubmitDesc = {};
+        queueSubmitDesc.signalFences = &signalFence;
+        queueSubmitDesc.signalFenceNum = 1;
+
+        NRI.QueueSubmit(*m_GraphicsQueue, queueSubmitDesc);
     }
 }
 
@@ -488,7 +1101,7 @@ void Sample::CreateRayTracingPipeline() {
     nri::DescriptorRangeDesc descriptorRanges[] = {
         {0, 1, nri::DescriptorType::STORAGE_TEXTURE, nri::StageBits::RAYGEN_SHADER},
         {1, 1, nri::DescriptorType::ACCELERATION_STRUCTURE, nri::StageBits::RAYGEN_SHADER},
-        {0, BOX_NUM, nri::DescriptorType::BUFFER, nri::StageBits::CLOSEST_HIT_SHADER, nri::DescriptorRangeBits::VARIABLE_SIZED_ARRAY | nri::DescriptorRangeBits::PARTIALLY_BOUND},
+        {0, RAY_TRACING_OBJ_NUM, nri::DescriptorType::BUFFER, nri::StageBits::CLOSEST_HIT_SHADER, nri::DescriptorRangeBits::VARIABLE_SIZED_ARRAY | nri::DescriptorRangeBits::PARTIALLY_BOUND},
     };
 
     nri::DescriptorSetDesc descriptorSetDescs[] = {
@@ -502,7 +1115,7 @@ void Sample::CreateRayTracingPipeline() {
     pipelineLayoutDesc.descriptorSetNum = helper::GetCountOf(descriptorSetDescs);
     pipelineLayoutDesc.shaderStages = nri::StageBits::RAYGEN_SHADER | nri::StageBits::CLOSEST_HIT_SHADER;
 
-    NRI_ABORT_ON_FAILURE(NRI.CreatePipelineLayout(*m_Device, pipelineLayoutDesc, m_PipelineLayout));
+    NRI_ABORT_ON_FAILURE(NRI.CreatePipelineLayout(*m_Device, pipelineLayoutDesc, m_RayTracingPipelineLayout));
 
     const nri::DeviceDesc& deviceDesc = NRI.GetDeviceDesc(*m_Device);
     utils::ShaderCodeStorage shaderCodeStorage;
@@ -516,241 +1129,18 @@ void Sample::CreateRayTracingPipeline() {
     shaderLibrary.shaders = shaders;
     shaderLibrary.shaderNum = helper::GetCountOf(shaders);
 
-    const nri::ShaderGroupDesc shaderGroupDescs[] = {{1}, {2}, {3}};
+    const nri::ShaderGroupDesc shaderGroupDescs[] = {{0}, {1}, {2}};
 
     nri::RayTracingPipelineDesc pipelineDesc = {};
     pipelineDesc.recursionMaxDepth = 1;
     pipelineDesc.rayPayloadMaxSize = 3 * sizeof(float);
     pipelineDesc.rayHitAttributeMaxSize = 2 * sizeof(float);
-    pipelineDesc.pipelineLayout = m_PipelineLayout;
+    pipelineDesc.pipelineLayout = m_RayTracingPipelineLayout;
     pipelineDesc.shaderGroups = shaderGroupDescs;
     pipelineDesc.shaderGroupNum = helper::GetCountOf(shaderGroupDescs);
     pipelineDesc.shaderLibrary = &shaderLibrary;
 
-    NRI_ABORT_ON_FAILURE(NRI.CreateRayTracingPipeline(*m_Device, pipelineDesc, m_Pipeline));
-}
-
-void Sample::CreateRayTracingOutput(nri::Format swapChainFormat) {
-    nri::TextureDesc rayTracingOutputDesc = {};
-    rayTracingOutputDesc.type = nri::TextureType::TEXTURE_2D;
-    rayTracingOutputDesc.format = swapChainFormat;
-    rayTracingOutputDesc.width = (uint16_t)GetOutputResolution().x;
-    rayTracingOutputDesc.height = (uint16_t)GetOutputResolution().y;
-    rayTracingOutputDesc.depth = 1;
-    rayTracingOutputDesc.layerNum = 1;
-    rayTracingOutputDesc.mipNum = 1;
-    rayTracingOutputDesc.sampleNum = 1;
-    rayTracingOutputDesc.usage = nri::TextureUsageBits::SHADER_RESOURCE_STORAGE;
-    NRI_ABORT_ON_FAILURE(NRI.CreateTexture(*m_Device, rayTracingOutputDesc, m_RayTracingOutput));
-
-    nri::MemoryDesc memoryDesc = {};
-    NRI.GetTextureMemoryDesc(*m_RayTracingOutput, nri::MemoryLocation::DEVICE, memoryDesc);
-
-    nri::AllocateMemoryDesc allocateMemoryDesc = {};
-    allocateMemoryDesc.size = memoryDesc.size;
-    allocateMemoryDesc.type = memoryDesc.type;
-
-    nri::Memory* memory = nullptr;
-    NRI_ABORT_ON_FAILURE(NRI.AllocateMemory(*m_Device, allocateMemoryDesc, memory));
-    m_MemoryAllocations.push_back(memory);
-
-    const nri::BindTextureMemoryDesc memoryBindingDesc = {m_RayTracingOutput, memory};
-    NRI_ABORT_ON_FAILURE(NRI.BindTextureMemory(&memoryBindingDesc, 1));
-
-    nri::TextureViewDesc textureViewDesc = {m_RayTracingOutput, nri::TextureView::STORAGE_TEXTURE, swapChainFormat};
-    NRI_ABORT_ON_FAILURE(NRI.CreateTextureView(textureViewDesc, m_RayTracingOutputView));
-
-    const nri::UpdateDescriptorRangeDesc updateDescriptorRangeDesc = {m_DescriptorSets[0], 0, 0, &m_RayTracingOutputView, 1};
-    NRI.UpdateDescriptorRanges(&updateDescriptorRangeDesc, 1);
-}
-
-void Sample::CreateDescriptorSets() {
-    nri::DescriptorPoolDesc descriptorPoolDesc = {};
-    descriptorPoolDesc.storageTextureMaxNum = 1;
-    descriptorPoolDesc.accelerationStructureMaxNum = 1;
-    descriptorPoolDesc.bufferMaxNum = BOX_NUM * 2;
-    descriptorPoolDesc.descriptorSetMaxNum = helper::GetCountOf(m_DescriptorSets);
-
-    NRI_ABORT_ON_FAILURE(NRI.CreateDescriptorPool(*m_Device, descriptorPoolDesc, m_DescriptorPool));
-    NRI_ABORT_ON_FAILURE(NRI.AllocateDescriptorSets(*m_DescriptorPool, *m_PipelineLayout, 0, &m_DescriptorSets[0], 1, 0));
-    NRI_ABORT_ON_FAILURE(NRI.AllocateDescriptorSets(*m_DescriptorPool, *m_PipelineLayout, 1, &m_DescriptorSets[1], 1, BOX_NUM));
-    NRI_ABORT_ON_FAILURE(NRI.AllocateDescriptorSets(*m_DescriptorPool, *m_PipelineLayout, 2, &m_DescriptorSets[2], 1, BOX_NUM));
-}
-
-void Sample::CreateShaderResources() {
-    const uint32_t triangleNum = helper::GetCountOf(indices) / 3;
-    std::vector<uint16_t> paddedIndices(triangleNum * 4, 0);
-    for (uint32_t i = 0; i < triangleNum; i++) {
-        paddedIndices[i * 4] = indices[i * 3];
-        paddedIndices[i * 4 + 1] = indices[i * 3 + 1];
-        paddedIndices[i * 4 + 2] = indices[i * 3 + 2];
-    }
-
-    const nri::BufferDesc texCoordBufferDesc = {sizeof(texCoords), 0, nri::BufferUsageBits::SHADER_RESOURCE};
-    const nri::BufferDesc indexBufferDesc = {helper::GetByteSizeOf(paddedIndices), 0, nri::BufferUsageBits::SHADER_RESOURCE};
-    NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, texCoordBufferDesc, m_TexCoordBuffer));
-    NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, indexBufferDesc, m_IndexBuffer));
-
-    nri::Buffer* buffers[] = {m_TexCoordBuffer, m_IndexBuffer};
-
-    nri::ResourceGroupDesc resourceGroupDesc = {};
-    resourceGroupDesc.memoryLocation = nri::MemoryLocation::DEVICE;
-    resourceGroupDesc.bufferNum = helper::GetCountOf(buffers);
-    resourceGroupDesc.buffers = buffers;
-
-    const size_t baseAllocation = m_MemoryAllocations.size();
-    m_MemoryAllocations.resize(baseAllocation + NRI.CalculateAllocationNumber(*m_Device, resourceGroupDesc), nullptr);
-    NRI_ABORT_ON_FAILURE(NRI.AllocateAndBindMemory(*m_Device, resourceGroupDesc, m_MemoryAllocations.data() + baseAllocation));
-
-    nri::BufferUploadDesc dataDescArray[] = {
-        {texCoords, m_TexCoordBuffer, {nri::AccessBits::SHADER_RESOURCE}},
-        {paddedIndices.data(), m_IndexBuffer, {nri::AccessBits::SHADER_RESOURCE}},
-    };
-    NRI_ABORT_ON_FAILURE(NRI.UploadData(*m_GraphicsQueue, nullptr, 0, dataDescArray, helper::GetCountOf(dataDescArray)));
-
-    nri::BufferViewDesc texCoordBufferViewDesc = {};
-    texCoordBufferViewDesc.buffer = m_TexCoordBuffer;
-    texCoordBufferViewDesc.type = nri::BufferView::BUFFER;
-    texCoordBufferViewDesc.format = nri::Format::RG32_SFLOAT;
-    texCoordBufferViewDesc.size = texCoordBufferDesc.size;
-
-    nri::BufferViewDesc indexBufferViewDesc = {};
-    indexBufferViewDesc.buffer = m_IndexBuffer;
-    indexBufferViewDesc.type = nri::BufferView::BUFFER;
-    indexBufferViewDesc.format = nri::Format::RGBA16_UINT;
-    indexBufferViewDesc.size = indexBufferDesc.size;
-
-    NRI_ABORT_ON_FAILURE(NRI.CreateBufferView(texCoordBufferViewDesc, m_TexCoordBufferView));
-    NRI_ABORT_ON_FAILURE(NRI.CreateBufferView(indexBufferViewDesc, m_IndexBufferView));
-
-    nri::UpdateDescriptorRangeDesc updateDescriptorRangeDesc = {};
-    updateDescriptorRangeDesc.descriptorSet = m_DescriptorSets[1];
-    updateDescriptorRangeDesc.descriptorNum = 1;
-    updateDescriptorRangeDesc.descriptors = &m_TexCoordBufferView;
-
-    for (uint32_t i = 0; i < BOX_NUM; i++) {
-        updateDescriptorRangeDesc.baseDescriptor = i;
-        NRI.UpdateDescriptorRanges(&updateDescriptorRangeDesc, 1);
-    }
-
-    updateDescriptorRangeDesc.descriptorSet = m_DescriptorSets[2];
-    updateDescriptorRangeDesc.descriptorNum = 1;
-    updateDescriptorRangeDesc.descriptors = &m_IndexBufferView;
-
-    for (uint32_t i = 0; i < BOX_NUM; i++) {
-        updateDescriptorRangeDesc.baseDescriptor = i;
-        NRI.UpdateDescriptorRanges(&updateDescriptorRangeDesc, 1);
-    }
-}
-
-void Sample::CreateBottomLevelAccelerationStructure() {
-    nri::Buffer* buffer = nullptr;
-    nri::Memory* memory = nullptr;
-    CreateUploadBuffer(sizeof(positions) + sizeof(indices), nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT, buffer, memory);
-
-    uint8_t* data = (uint8_t*)NRI.MapBuffer(*buffer, 0, sizeof(positions) + sizeof(indices));
-    memcpy(data, positions, sizeof(positions));
-    memcpy(data + sizeof(positions), indices, sizeof(indices));
-    NRI.UnmapBuffer(*buffer);
-
-    nri::BottomLevelGeometryDesc object = {};
-    object.type = nri::BottomLevelGeometryType::TRIANGLES;
-    object.flags = nri::BottomLevelGeometryBits::OPAQUE_GEOMETRY;
-    object.triangles.vertexBuffer = buffer;
-    object.triangles.vertexFormat = nri::Format::RGB32_SFLOAT;
-    object.triangles.vertexNum = helper::GetCountOf(positions) / 3;
-    object.triangles.vertexStride = 3 * sizeof(float);
-    object.triangles.indexBuffer = buffer;
-    object.triangles.indexOffset = sizeof(positions);
-    object.triangles.indexNum = helper::GetCountOf(indices);
-    object.triangles.indexType = nri::IndexType::UINT16;
-
-    nri::AccelerationStructureDesc accelerationStructureDesc = {};
-    accelerationStructureDesc.type = nri::AccelerationStructureType::BOTTOM_LEVEL;
-    accelerationStructureDesc.flags = BUILD_FLAGS;
-    accelerationStructureDesc.geometryOrInstanceNum = 1;
-    accelerationStructureDesc.geometries = &object;
-
-    NRI_ABORT_ON_FAILURE(NRI.CreateAccelerationStructure(*m_Device, accelerationStructureDesc, m_BLAS));
-
-    nri::MemoryDesc memoryDesc = {};
-    NRI.GetAccelerationStructureMemoryDesc(*m_BLAS, nri::MemoryLocation::DEVICE, memoryDesc);
-
-    nri::AllocateMemoryDesc allocateMemoryDesc = {};
-    allocateMemoryDesc.size = memoryDesc.size;
-    allocateMemoryDesc.type = memoryDesc.type;
-
-    nri::Memory* ASMemory = nullptr;
-    NRI_ABORT_ON_FAILURE(NRI.AllocateMemory(*m_Device, allocateMemoryDesc, ASMemory));
-    m_MemoryAllocations.push_back(ASMemory);
-
-    const nri::BindAccelerationStructureMemoryDesc memoryBindingDesc = {m_BLAS, ASMemory};
-    NRI_ABORT_ON_FAILURE(NRI.BindAccelerationStructureMemory(&memoryBindingDesc, 1));
-
-    BuildBottomLevelAccelerationStructure(*m_BLAS, &object, 1);
-
-    NRI.DestroyBuffer(buffer);
-    NRI.FreeMemory(memory);
-}
-
-void Sample::CreateTopLevelAccelerationStructure() {
-    nri::AccelerationStructureDesc accelerationStructureDesc = {};
-    accelerationStructureDesc.type = nri::AccelerationStructureType::TOP_LEVEL;
-    accelerationStructureDesc.flags = BUILD_FLAGS;
-    accelerationStructureDesc.geometryOrInstanceNum = BOX_NUM;
-
-    NRI_ABORT_ON_FAILURE(NRI.CreateAccelerationStructure(*m_Device, accelerationStructureDesc, m_TLAS));
-
-    nri::MemoryDesc memoryDesc = {};
-    NRI.GetAccelerationStructureMemoryDesc(*m_TLAS, nri::MemoryLocation::DEVICE, memoryDesc);
-
-    nri::AllocateMemoryDesc allocateMemoryDesc = {};
-    allocateMemoryDesc.size = memoryDesc.size;
-    allocateMemoryDesc.type = memoryDesc.type;
-
-    nri::Memory* ASMemory = nullptr;
-    NRI_ABORT_ON_FAILURE(NRI.AllocateMemory(*m_Device, allocateMemoryDesc, ASMemory));
-    m_MemoryAllocations.push_back(ASMemory);
-
-    const nri::BindAccelerationStructureMemoryDesc memoryBindingDesc = {m_TLAS, ASMemory};
-    NRI_ABORT_ON_FAILURE(NRI.BindAccelerationStructureMemory(&memoryBindingDesc, 1));
-
-    std::vector<nri::TopLevelInstance> geometryObjectInstances(BOX_NUM, nri::TopLevelInstance{});
-
-    const float lineWidth = 120.0f;
-    const uint32_t lineSize = 100;
-    const float step = lineWidth / (lineSize - 1);
-
-    for (uint32_t i = 0; i < geometryObjectInstances.size(); i++) {
-        nri::TopLevelInstance& instance = geometryObjectInstances[i];
-        instance.accelerationStructureHandle = NRI.GetAccelerationStructureHandle(*m_BLAS);
-        instance.instanceId = i;
-        instance.transform[0][0] = 1.0f;
-        instance.transform[1][1] = 1.0f;
-        instance.transform[2][2] = 1.0f;
-        instance.transform[0][3] = -lineWidth * 0.5f + (i % lineSize) * step;
-        instance.transform[1][3] = -10.0f + (i / lineSize) * step;
-        instance.transform[2][3] = 10.0f + (i / lineSize) * step;
-        instance.mask = 0xff;
-    }
-
-    nri::Buffer* buffer = nullptr;
-    nri::Memory* memory = nullptr;
-    CreateUploadBuffer(helper::GetByteSizeOf(geometryObjectInstances), nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT, buffer, memory);
-
-    void* data = NRI.MapBuffer(*buffer, 0, nri::WHOLE_SIZE);
-    memcpy(data, geometryObjectInstances.data(), helper::GetByteSizeOf(geometryObjectInstances));
-    NRI.UnmapBuffer(*buffer);
-
-    BuildTopLevelAccelerationStructure(*m_TLAS, (uint32_t)geometryObjectInstances.size(), *buffer);
-
-    NRI.DestroyBuffer(buffer);
-    NRI.FreeMemory(memory);
-
-    NRI_ABORT_ON_FAILURE(NRI.CreateAccelerationStructureDescriptor(*m_TLAS, m_TLASDescriptor));
-
-    const nri::UpdateDescriptorRangeDesc updateDescriptorRangeDesc = {m_DescriptorSets[0], 1, 0, &m_TLASDescriptor, 1};
-    NRI.UpdateDescriptorRanges(&updateDescriptorRangeDesc, 1);
+    NRI_ABORT_ON_FAILURE(NRI.CreateRayTracingPipeline(*m_Device, pipelineDesc, m_RayTracingPipeline));
 }
 
 void Sample::CreateUploadBuffer(uint64_t size, nri::BufferUsageBits usage, nri::Buffer*& buffer, nri::Memory*& memory) {
@@ -861,6 +1251,130 @@ void Sample::BuildTopLevelAccelerationStructure(nri::AccelerationStructure& acce
     NRI.FreeMemory(scratchBufferMemory);
 }
 
+void Sample::CreateBottomLevelAccelerationStructure() {
+    std::vector<float> positions = {};
+    std::vector<uint16_t> indices = {};
+
+    for (size_t i = 0; i < m_Scene.indices.size(); i++) {
+        size_t tem_index = m_Scene.indices[i];
+
+        indices.push_back((uint16_t)tem_index);
+
+        positions.push_back(m_Scene.vertices[tem_index].pos[0]);
+        positions.push_back(m_Scene.vertices[tem_index].pos[1]);
+        positions.push_back(m_Scene.vertices[tem_index].pos[2]);
+    }
+
+    nri::Buffer* buffer = nullptr;
+    nri::Memory* memory = nullptr;
+    CreateUploadBuffer(positions.size() * sizeof(float) + indices.size() * sizeof(uint16_t), nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT, buffer, memory);
+
+    uint8_t* data = (uint8_t*)NRI.MapBuffer(*buffer, 0, positions.size() * sizeof(float) + indices.size() * sizeof(uint16_t));
+    memcpy(data, positions.data(), positions.size() * sizeof(float));
+    memcpy(data + positions.size() * sizeof(float), indices.data(), indices.size() * sizeof(uint16_t));
+    NRI.UnmapBuffer(*buffer);
+
+    nri::BottomLevelGeometryDesc object = {};
+    object.type = nri::BottomLevelGeometryType::TRIANGLES;
+    object.flags = nri::BottomLevelGeometryBits::OPAQUE_GEOMETRY;
+    object.triangles.vertexBuffer = buffer;
+    object.triangles.vertexFormat = nri::Format::RGB32_SFLOAT;
+    object.triangles.vertexNum = (uint16_t)positions.size() / 3;
+    object.triangles.vertexStride = 3 * sizeof(float);
+    object.triangles.indexBuffer = buffer;
+    object.triangles.indexOffset = positions.size() * sizeof(float);
+    object.triangles.indexNum = (uint32_t)indices.size();
+    object.triangles.indexType = nri::IndexType::UINT16;
+
+    nri::AccelerationStructureDesc accelerationStructureDesc = {};
+    accelerationStructureDesc.type = nri::AccelerationStructureType::BOTTOM_LEVEL;
+    accelerationStructureDesc.flags = BUILD_FLAGS;
+    accelerationStructureDesc.geometryOrInstanceNum = 1;
+    accelerationStructureDesc.geometries = &object;
+
+    NRI_ABORT_ON_FAILURE(NRI.CreateAccelerationStructure(*m_Device, accelerationStructureDesc, m_BLAS));
+
+    nri::MemoryDesc memoryDesc = {};
+    NRI.GetAccelerationStructureMemoryDesc(*m_BLAS, nri::MemoryLocation::DEVICE, memoryDesc);
+
+    nri::AllocateMemoryDesc allocateMemoryDesc = {};
+    allocateMemoryDesc.size = memoryDesc.size;
+    allocateMemoryDesc.type = memoryDesc.type;
+
+    nri::Memory* ASMemory = nullptr;
+    NRI_ABORT_ON_FAILURE(NRI.AllocateMemory(*m_Device, allocateMemoryDesc, ASMemory));
+    m_MemoryAllocations.push_back(ASMemory);
+
+    const nri::BindAccelerationStructureMemoryDesc memoryBindingDesc = {m_BLAS, ASMemory};
+    NRI_ABORT_ON_FAILURE(NRI.BindAccelerationStructureMemory(&memoryBindingDesc, 1));
+
+    BuildBottomLevelAccelerationStructure(*m_BLAS, &object, 1);
+
+    NRI.DestroyBuffer(buffer);
+    NRI.FreeMemory(memory);
+}
+
+void Sample::CreateTopLevelAccelerationStructure() {
+    nri::AccelerationStructureDesc accelerationStructureDesc = {};
+    accelerationStructureDesc.type = nri::AccelerationStructureType::TOP_LEVEL;
+    accelerationStructureDesc.flags = BUILD_FLAGS;
+    accelerationStructureDesc.geometryOrInstanceNum = RAY_TRACING_OBJ_NUM;
+
+    NRI_ABORT_ON_FAILURE(NRI.CreateAccelerationStructure(*m_Device, accelerationStructureDesc, m_TLAS));
+
+    nri::MemoryDesc memoryDesc = {};
+    NRI.GetAccelerationStructureMemoryDesc(*m_TLAS, nri::MemoryLocation::DEVICE, memoryDesc);
+
+    nri::AllocateMemoryDesc allocateMemoryDesc = {};
+    allocateMemoryDesc.size = memoryDesc.size;
+    allocateMemoryDesc.type = memoryDesc.type;
+
+    nri::Memory* ASMemory = nullptr;
+    NRI_ABORT_ON_FAILURE(NRI.AllocateMemory(*m_Device, allocateMemoryDesc, ASMemory));
+    m_MemoryAllocations.push_back(ASMemory);
+
+    const nri::BindAccelerationStructureMemoryDesc memoryBindingDesc = {m_TLAS, ASMemory};
+    NRI_ABORT_ON_FAILURE(NRI.BindAccelerationStructureMemory(&memoryBindingDesc, 1));
+
+    std::vector<nri::TopLevelInstance> geometryObjectInstances(RAY_TRACING_OBJ_NUM, nri::TopLevelInstance{});
+
+    // const float lineWidth = 120.0f;
+    // const uint32_t lineSize = 100;
+    // const float step = lineWidth / (lineSize - 1);
+
+    for (uint32_t i = 0; i < geometryObjectInstances.size(); i++) {
+        nri::TopLevelInstance& instance = geometryObjectInstances[i];
+        instance.accelerationStructureHandle = NRI.GetAccelerationStructureHandle(*m_BLAS);
+        instance.instanceId = i;
+        auto tem_instance = m_Scene.instances[i];
+        instance.transform[0][0] = tem_instance.scale.x;
+        instance.transform[1][1] = tem_instance.scale.y;
+        instance.transform[2][2] = tem_instance.scale.z;
+        instance.transform[0][3] = (float)tem_instance.position.x;
+        instance.transform[1][3] = (float)tem_instance.position.y;
+        instance.transform[2][3] = (float)tem_instance.position.z;
+        instance.mask = 0xff;
+    }
+
+    nri::Buffer* buffer = nullptr;
+    nri::Memory* memory = nullptr;
+    CreateUploadBuffer(helper::GetByteSizeOf(geometryObjectInstances), nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT, buffer, memory);
+
+    void* data = NRI.MapBuffer(*buffer, 0, nri::WHOLE_SIZE);
+    memcpy(data, geometryObjectInstances.data(), helper::GetByteSizeOf(geometryObjectInstances));
+    NRI.UnmapBuffer(*buffer);
+
+    BuildTopLevelAccelerationStructure(*m_TLAS, (uint32_t)geometryObjectInstances.size(), *buffer);
+
+    NRI.DestroyBuffer(buffer);
+    NRI.FreeMemory(memory);
+
+    NRI_ABORT_ON_FAILURE(NRI.CreateAccelerationStructureDescriptor(*m_TLAS, m_TLASDescriptor));
+
+    const nri::UpdateDescriptorRangeDesc updateDescriptorRangeDesc = {m_RayTracingDescriptorSet, 1, 0, &m_TLASDescriptor, 1};
+    NRI.UpdateDescriptorRanges(&updateDescriptorRangeDesc, 1);
+}
+
 void Sample::CreateShaderTable() {
     const nri::DeviceDesc& deviceDesc = NRI.GetDeviceDesc(*m_Device);
     const uint64_t identifierSize = deviceDesc.shaderStage.rayTracing.shaderGroupIdentifierSize;
@@ -885,7 +1399,7 @@ void Sample::CreateShaderTable() {
 
     std::vector<uint8_t> content((size_t)shaderTableSize, 0);
     for (uint32_t i = 0; i < 3; i++)
-        NRI.WriteShaderGroupIdentifiers(*m_Pipeline, i, 1, content.data() + i * helper::Align(identifierSize, tableAlignment));
+        NRI.WriteShaderGroupIdentifiers(*m_RayTracingPipeline, i, 1, content.data() + i * helper::Align(identifierSize, tableAlignment));
 
     nri::BufferUploadDesc dataDesc = {};
     dataDesc.data = content.data();
