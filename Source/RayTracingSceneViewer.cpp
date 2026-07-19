@@ -1252,39 +1252,44 @@ void Sample::BuildTopLevelAccelerationStructure(nri::AccelerationStructure& acce
 }
 
 void Sample::CreateBottomLevelAccelerationStructure() {
-    std::vector<float> positions = {};
-    std::vector<uint16_t> indices = {};
-
-    for (size_t i = 0; i < m_Scene.indices.size(); i++) {
-        size_t tem_index = m_Scene.indices[i];
-
-        indices.push_back((uint16_t)tem_index);
-
-        positions.push_back(m_Scene.vertices[tem_index].pos[0]);
-        positions.push_back(m_Scene.vertices[tem_index].pos[1]);
-        positions.push_back(m_Scene.vertices[tem_index].pos[2]);
-    }
+    const uint64_t vertexBufferSize = m_Scene.vertices.size() * sizeof(utils::Vertex);
+    const uint64_t indexBufferSize = m_Scene.indices.size() * sizeof(utils::Index);
 
     nri::Buffer* buffer = nullptr;
     nri::Memory* memory = nullptr;
-    CreateUploadBuffer(positions.size() * sizeof(float) + indices.size() * sizeof(uint16_t), nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT, buffer, memory);
+    CreateUploadBuffer(vertexBufferSize + indexBufferSize, nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT, buffer, memory);
 
-    uint8_t* data = (uint8_t*)NRI.MapBuffer(*buffer, 0, positions.size() * sizeof(float) + indices.size() * sizeof(uint16_t));
-    memcpy(data, positions.data(), positions.size() * sizeof(float));
-    memcpy(data + positions.size() * sizeof(float), indices.data(), indices.size() * sizeof(uint16_t));
+    auto* data = (uint8_t*)NRI.MapBuffer(*buffer, 0, vertexBufferSize + indexBufferSize);
+    memcpy(data, m_Scene.vertices.data(), vertexBufferSize);
+    memcpy(data + vertexBufferSize, m_Scene.indices.data(), indexBufferSize);
+
+    // Rebase indices: each mesh's indices are relative (0-based), but BLAS expects
+    // absolute indices since there's no "baseVertex" concept in ray tracing AS build
+    auto* indices = (utils::Index*)(data + vertexBufferSize);
+    for (const auto& mesh : m_Scene.meshes) {
+        for (uint32_t i = 0; i < mesh.indexNum; i++) {
+            indices[mesh.indexOffset + i] += mesh.vertexOffset;
+        }
+    }
+
     NRI.UnmapBuffer(*buffer);
 
     nri::BottomLevelGeometryDesc object = {};
     object.type = nri::BottomLevelGeometryType::TRIANGLES;
     object.flags = nri::BottomLevelGeometryBits::OPAQUE_GEOMETRY;
+
+    // Vertex
     object.triangles.vertexBuffer = buffer;
     object.triangles.vertexFormat = nri::Format::RGB32_SFLOAT;
-    object.triangles.vertexNum = (uint16_t)positions.size() / 3;
-    object.triangles.vertexStride = 3 * sizeof(float);
+    object.triangles.vertexNum = (uint32_t)m_Scene.vertices.size();
+    object.triangles.vertexStride = sizeof(utils::Vertex);
+    object.triangles.vertexOffset = offsetof(utils::Vertex, pos);
+
+    // Index
     object.triangles.indexBuffer = buffer;
-    object.triangles.indexOffset = positions.size() * sizeof(float);
-    object.triangles.indexNum = (uint32_t)indices.size();
-    object.triangles.indexType = nri::IndexType::UINT16;
+    object.triangles.indexOffset = (uint32_t)vertexBufferSize;
+    object.triangles.indexNum = (uint32_t)m_Scene.indices.size();
+    object.triangles.indexType = sizeof(utils::Index) == 2 ? nri::IndexType::UINT16 : nri::IndexType::UINT32;
 
     nri::AccelerationStructureDesc accelerationStructureDesc = {};
     accelerationStructureDesc.type = nri::AccelerationStructureType::BOTTOM_LEVEL;
